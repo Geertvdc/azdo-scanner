@@ -55,8 +55,27 @@ namespace AzdoScanner.Infrastructure
                     }
                     else
                     {
+                        // Parse organization and project from output
+                        string? org = null;
+                        string? project = null;
+                        var lines = output.Split('\n');
+                        foreach (var line in lines)
+                        {
+                            var trimmed = line.Trim();
+                            if (trimmed.StartsWith("organization = "))
+                                org = trimmed.Substring("organization = ".Length).Trim();
+                            if (trimmed.StartsWith("project = "))
+                                project = trimmed.Substring("project = ".Length).Trim();
+                        }
                         AnsiConsole.MarkupLine("[green]Azure DevOps CLI configuration:[/]");
-                        AnsiConsole.WriteLine(output.Trim());
+                        if (!string.IsNullOrEmpty(org))
+                            AnsiConsole.MarkupLine($"[blue]Organization:[/] {org}");
+                        else
+                            AnsiConsole.MarkupLine("[yellow]No organization default set.[/]");
+                        if (!string.IsNullOrEmpty(project))
+                            AnsiConsole.MarkupLine($"[blue]Project:[/] {project}");
+                        else
+                            AnsiConsole.MarkupLine("[yellow]No project default set.[/]");
                     }
                     return true;
                 }
