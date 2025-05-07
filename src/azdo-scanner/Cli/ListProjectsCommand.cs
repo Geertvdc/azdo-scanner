@@ -7,6 +7,10 @@ namespace AzdoScanner.Cli
 {
     public class ListProjectsCommandSettings : CommandSettings
     {
+        [Description("Include a list of service connections for each project.")]
+        [CommandOption("--include-serviceconnections")]
+        public bool IncludeServiceConnections { get; set; }
+
         [Description("Comma-separated list of project names to include (optional). If not set, all projects are included.")]
         [CommandOption("--projects <PROJECTS>")]
         public string? Projects { get; set; }
@@ -208,6 +212,42 @@ namespace AzdoScanner.Cli
                         else
                         {
                             reposNode.AddNode("[red]Error fetching repos.[/]");
+                        }
+
+                        // Add a 'Service Connections' node under the project if requested
+                        if (settings.IncludeServiceConnections)
+                        {
+                            var svcNode = projectNode.AddNode("🔗 [bold green]Service Connections[/]");
+                            var svcResult = _processRunner.Run(
+                                "az",
+                                $"devops service-endpoint list --project \"{projectName}\" --org {usedOrg} --output json");
+                            if (svcResult.ExitCode == 0)
+                            {
+                                try
+                                {
+                                    var svcJson = System.Text.Json.JsonDocument.Parse(svcResult.Output);
+                                    if (svcJson.RootElement.ValueKind == System.Text.Json.JsonValueKind.Array && svcJson.RootElement.GetArrayLength() > 0)
+                                    {
+                                        foreach (var svc in svcJson.RootElement.EnumerateArray())
+                                        {
+                                            string? svcName = svc.TryGetProperty("name", out var n) ? n.GetString() : null;
+                                            string? svcType = svc.TryGetProperty("type", out var t) ? t.GetString() : null;
+                                            string? svcId = svc.TryGetProperty("id", out var i) ? i.GetString() : null;
+                                            var svcLabel = $"[green]{svcName}[/] [grey]({svcType})[/] [dim]{svcId}[/]";
+                                            svcNode.AddNode(svcLabel);
+                                        }
+                                    }
+                                    else
+                                    {
+                                        svcNode.AddNode("[grey]No service connections found.[/]");
+                                    }
+                                }
+                                catch { svcNode.AddNode("[red]Error parsing service connections.[/]"); }
+                            }
+                            else
+                            {
+                                svcNode.AddNode("[red]Error fetching service connections.[/]");
+                            }
                         }
                     }
                     AnsiConsole.Write(tree);
