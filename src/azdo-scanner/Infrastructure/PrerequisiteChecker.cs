@@ -49,33 +49,10 @@ namespace AzdoScanner.Infrastructure
                 process.WaitForExit(3000);
                 if (process.ExitCode == 0)
                 {
+                    // Only print a warning if no defaults are configured
                     if (string.IsNullOrWhiteSpace(output) || !output.Contains("[defaults]"))
                     {
                         AnsiConsole.MarkupLine("[yellow]No Azure DevOps defaults are configured.[/]");
-                    }
-                    else
-                    {
-                        // Parse organization and project from output
-                        string? org = null;
-                        string? project = null;
-                        var lines = output.Split('\n');
-                        foreach (var line in lines)
-                        {
-                            var trimmed = line.Trim();
-                            if (trimmed.StartsWith("organization = "))
-                                org = trimmed.Substring("organization = ".Length).Trim();
-                            if (trimmed.StartsWith("project = "))
-                                project = trimmed.Substring("project = ".Length).Trim();
-                        }
-                        AnsiConsole.MarkupLine("[green]Azure DevOps CLI configuration:[/]");
-                        if (!string.IsNullOrEmpty(org))
-                            AnsiConsole.MarkupLine($"[blue]Organization:[/] {org}");
-                        else
-                            AnsiConsole.MarkupLine("[yellow]No organization default set.[/]");
-                        if (!string.IsNullOrEmpty(project))
-                            AnsiConsole.MarkupLine($"[blue]Project:[/] {project}");
-                        else
-                            AnsiConsole.MarkupLine("[yellow]No project default set.[/]");
                     }
                     return true;
                 }

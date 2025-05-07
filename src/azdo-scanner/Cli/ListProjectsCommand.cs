@@ -5,6 +5,10 @@ using AzdoScanner.Core;
 
 namespace AzdoScanner.Cli
 {
+    // Helper record types
+    internal record RepoInfo(string Name, string Id, string MainBranchPolicyStatus);
+    internal record ServiceConnectionInfo(string Name, string Type, string Id);
+
     public class ListProjectsCommandSettings : CommandSettings
     {
         [Description("Include a list of service connections for each project.")]
@@ -35,302 +39,265 @@ namespace AzdoScanner.Cli
 
         public override int Execute(CommandContext context, ListProjectsCommandSettings settings)
         {
-            // Parse project filter if provided
-            HashSet<string>? projectFilter = null;
-            if (!string.IsNullOrWhiteSpace(settings.Projects))
-            {
-                projectFilter = new HashSet<string>(settings.Projects.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries), StringComparer.OrdinalIgnoreCase);
-            }
-            string? org = settings.Organization;
-            string? usedOrg = org;
-            if (!string.IsNullOrWhiteSpace(org) && !org.StartsWith("http", System.StringComparison.OrdinalIgnoreCase))
-            {
-                usedOrg = $"https://dev.azure.com/{org.Trim('/')}";
-            }
-            // If no org specified, get the default from az devops config
+            // 1. Resolve organization
+            string? usedOrg = settings.Organization;
             if (string.IsNullOrWhiteSpace(usedOrg))
             {
-                var configResult = _processRunner.Run("az", "devops configure --list --output json");
-                if (configResult.ExitCode == 0)
+                var orgResult = _processRunner.Run("az", "devops configure --list --output json");
+                if (orgResult.ExitCode == 0)
                 {
                     try
                     {
-                        var configJson = System.Text.Json.JsonDocument.Parse(configResult.Output);
-                        if (configJson.RootElement.TryGetProperty("organization", out var orgProp))
+                        var orgJson = System.Text.Json.JsonDocument.Parse(orgResult.Output);
+                        if (orgJson.RootElement.TryGetProperty("organization", out var orgProp))
                         {
-                            usedOrg = orgProp.GetString();
+                            usedOrg = orgProp.GetString() ?? "";
                         }
                     }
                     catch { }
                 }
             }
-            var orgArg = string.IsNullOrWhiteSpace(usedOrg) ? "" : $"--org {usedOrg}";
-            AnsiConsole.MarkupLine($"[grey]Using organization:[/] [bold]{(usedOrg ?? "(none set, using az default)")}[/]");
-            var result = _processRunner.Run("az", $"devops project list {orgArg} --output json");
-            if (result.ExitCode != 0)
+            if (string.IsNullOrWhiteSpace(usedOrg))
             {
-                AnsiConsole.MarkupLine($"[red]az devops CLI error:[/] {result.Error}");
+                AnsiConsole.MarkupLine("[red]No organization specified or found in az config.[/]");
                 return 1;
             }
-            try
+
+
+            // Normalize org URL if needed
+            if (!usedOrg.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
             {
-                var json = System.Text.Json.JsonDocument.Parse(result.Output);
-                var projects = json.RootElement.GetProperty("value");
-                if (projects.GetArrayLength() == 0)
+                if (!usedOrg.Contains("dev.azure.com", StringComparison.OrdinalIgnoreCase))
                 {
-                    AnsiConsole.MarkupLine("[yellow]No projects found.[/]");
-                    return 0;
-                }
-
-                if (settings.IncludeRepos)
-                {
-                    var tree = new Tree("[bold]Azure DevOps Projects[/]");
-                    foreach (var project in projects.EnumerateArray())
-                    {
-                        var projectName = project.GetProperty("name").GetString() ?? "";
-                        var projectId = project.GetProperty("id").GetString() ?? "";
-                        if (projectFilter != null && !projectFilter.Contains(projectName))
-                            continue;
-                        // Get Project Administrators group descriptor
-                        var groupResult = _processRunner.Run(
-                            "az",
-                            $"devops security group list --project \"{projectName}\" --org {usedOrg} --output json");
-                        string? adminDescriptor = null;
-                        if (groupResult.ExitCode == 0)
-                        {
-                            try
-                            {
-                                var groupJson = System.Text.Json.JsonDocument.Parse(groupResult.Output);
-                                foreach (var group in groupJson.RootElement.GetProperty("graphGroups").EnumerateArray())
-                                {
-                                    if (group.GetProperty("displayName").GetString() == "Project Administrators")
-                                    {
-                                        adminDescriptor = group.GetProperty("descriptor").GetString();
-                                        break;
-                                    }
-                                }
-                            }
-                            catch { }
-                        }
-                        // Admins as nodes
-                        var projectLabel = $"[bold]{projectName}[/] ([grey]{projectId}[/])";
-                        var projectNode = tree.AddNode(projectLabel);
-
-                        var adminsNode = projectNode.AddNode("👤 [bold blue]Admins[/]");
-                        int adminCount = 0;
-                        if (!string.IsNullOrEmpty(adminDescriptor))
-                        {
-                            var membersResult = _processRunner.Run(
-                                "az",
-                                $"devops security group membership list --id {adminDescriptor} --org {usedOrg} --output json");
-                            if (membersResult.ExitCode == 0)
-                            {
-                                try
-                                {
-                                    var membersJson = System.Text.Json.JsonDocument.Parse(membersResult.Output);
-                                    if (membersJson.RootElement.ValueKind == System.Text.Json.JsonValueKind.Object)
-                                    {
-                                        foreach (var member in membersJson.RootElement.EnumerateObject())
-                                        {
-                                            if (member.Value.TryGetProperty("mailAddress", out var emailProp))
-                                            {
-                                                var email = emailProp.GetString();
-                                                if (!string.IsNullOrEmpty(email))
-                                                {
-                                                    adminsNode.AddNode($"[blue]{email}[/]");
-                                                    adminCount++;
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                                catch { adminsNode.AddNode("[red]Error parsing admins.[/]"); }
-                            }
-                            else
-                            {
-                                adminsNode.AddNode("[red]Error fetching admins.[/]");
-                            }
-                        }
-                        if (adminCount == 0)
-                        {
-                            adminsNode.AddNode("[grey]No admins found.[/]");
-                        }
-
-                        // Add a 'Repos' node under the project
-                        var reposNode = projectNode.AddNode("📦 [bold yellow]Repos[/]");
-
-                        var reposResult = _processRunner.Run(
-                            "az",
-                            $"repos list --project \"{projectName}\" --org {usedOrg} --output json");
-                        if (reposResult.ExitCode == 0)
-                        {
-                            try
-                            {
-                                var reposJson = System.Text.Json.JsonDocument.Parse(reposResult.Output);
-                                if (reposJson.RootElement.ValueKind == System.Text.Json.JsonValueKind.Array && reposJson.RootElement.GetArrayLength() > 0)
-                                {
-                                    foreach (var repo in reposJson.RootElement.EnumerateArray())
-                                    {
-                                        string? repoName = null;
-                                        string? repoId = null;
-                                        if (repo.TryGetProperty("name", out var nameProp))
-                                            repoName = nameProp.GetString();
-                                        if (repo.TryGetProperty("id", out var idProp))
-                                            repoId = idProp.GetString();
-                                        // Check branch policy for main branch
-                                        string branch = "main";
-                                        string policyStatus = "[red]✗[/]";
-                                        if (!string.IsNullOrEmpty(repoId))
-                                        {
-                                            var policyResult = _processRunner.Run(
-                                                "az",
-                                                $"repos policy list --project \"{projectName}\" --org {usedOrg} --repository-id {repoId} --branch {branch} --output json");
-                                            if (policyResult.ExitCode == 0)
-                                            {
-                                                try
-                                                {
-                                                    var policyJson = System.Text.Json.JsonDocument.Parse(policyResult.Output);
-                                                    if (policyJson.RootElement.ValueKind == System.Text.Json.JsonValueKind.Array && policyJson.RootElement.GetArrayLength() > 0)
-                                                    {
-                                                        policyStatus = "[green]✔[/]";
-                                                    }
-                                                }
-                                                catch { }
-                                            }
-                                        }
-                                        var repoLabel = $"[yellow]{repoName}[/] [grey]({branch})[/] Policy: {policyStatus}";
-                                        reposNode.AddNode(repoLabel);
-                                    }
-                                }
-                                else
-                                {
-                                    reposNode.AddNode("[grey]No repositories found.[/]");
-                                }
-                            }
-                            catch { reposNode.AddNode("[red]Error parsing repos.[/]"); }
-                        }
-                        else
-                        {
-                            reposNode.AddNode("[red]Error fetching repos.[/]");
-                        }
-
-                        // Add a 'Service Connections' node under the project if requested
-                        if (settings.IncludeServiceConnections)
-                        {
-                            var svcNode = projectNode.AddNode("🔗 [bold green]Service Connections[/]");
-                            var svcResult = _processRunner.Run(
-                                "az",
-                                $"devops service-endpoint list --project \"{projectName}\" --org {usedOrg} --output json");
-                            if (svcResult.ExitCode == 0)
-                            {
-                                try
-                                {
-                                    var svcJson = System.Text.Json.JsonDocument.Parse(svcResult.Output);
-                                    if (svcJson.RootElement.ValueKind == System.Text.Json.JsonValueKind.Array && svcJson.RootElement.GetArrayLength() > 0)
-                                    {
-                                        foreach (var svc in svcJson.RootElement.EnumerateArray())
-                                        {
-                                            string? svcName = svc.TryGetProperty("name", out var n) ? n.GetString() : null;
-                                            string? svcType = svc.TryGetProperty("type", out var t) ? t.GetString() : null;
-                                            string? svcId = svc.TryGetProperty("id", out var i) ? i.GetString() : null;
-                                            var svcLabel = $"[green]{svcName}[/] [grey]({svcType})[/] [dim]{svcId}[/]";
-                                            svcNode.AddNode(svcLabel);
-                                        }
-                                    }
-                                    else
-                                    {
-                                        svcNode.AddNode("[grey]No service connections found.[/]");
-                                    }
-                                }
-                                catch { svcNode.AddNode("[red]Error parsing service connections.[/]"); }
-                            }
-                            else
-                            {
-                                svcNode.AddNode("[red]Error fetching service connections.[/]");
-                            }
-                        }
-                    }
-                    AnsiConsole.Write(tree);
+                    usedOrg = $"https://dev.azure.com/{usedOrg.Trim().Trim('/')}";
                 }
                 else
                 {
-                    // Table output for project-only info
-                    var table = new Table();
-                    table.AddColumn("Project Name");
-                    table.AddColumn("ID");
-                    table.AddColumn("Admin Count");
-                    table.AddColumn("Admin Emails");
-                    foreach (var project in projects.EnumerateArray())
-                    {
-                        var projectName = project.GetProperty("name").GetString() ?? "";
-                        var projectId = project.GetProperty("id").GetString() ?? "";
-                        if (projectFilter != null && !projectFilter.Contains(projectName))
-                            continue;
-                        // Get Project Administrators group descriptor
-                        var groupResult = _processRunner.Run(
-                            "az",
-                            $"devops security group list --project \"{projectName}\" --org {usedOrg} --output json");
-                        string? adminDescriptor = null;
-                        if (groupResult.ExitCode == 0)
-                        {
-                            try
-                            {
-                                var groupJson = System.Text.Json.JsonDocument.Parse(groupResult.Output);
-                                foreach (var group in groupJson.RootElement.GetProperty("graphGroups").EnumerateArray())
-                                {
-                                    if (group.GetProperty("displayName").GetString() == "Project Administrators")
-                                    {
-                                        adminDescriptor = group.GetProperty("descriptor").GetString();
-                                        break;
-                                    }
-                                }
-                            }
-                            catch { }
-                        }
-                        int adminCount = 0;
-                        string adminEmails = "";
-                        if (!string.IsNullOrEmpty(adminDescriptor))
-                        {
-                            var membersResult = _processRunner.Run(
-                                "az",
-                                $"devops security group membership list --id {adminDescriptor} --org {usedOrg} --output json");
-                            if (membersResult.ExitCode == 0)
-                            {
-                                try
-                                {
-                                    var membersJson = System.Text.Json.JsonDocument.Parse(membersResult.Output);
-                                    var emails = new List<string>();
-                                    if (membersJson.RootElement.ValueKind == System.Text.Json.JsonValueKind.Object)
-                                    {
-                                        foreach (var member in membersJson.RootElement.EnumerateObject())
-                                        {
-                                            if (member.Value.TryGetProperty("mailAddress", out var emailProp))
-                                            {
-                                                var email = emailProp.GetString();
-                                                if (!string.IsNullOrEmpty(email))
-                                                {
-                                                    emails.Add(email);
-                                                }
-                                            }
-                                        }
-                                    }
-                                    adminCount = emails.Count;
-                                    adminEmails = string.Join(", ", emails);
-                                }
-                                catch { }
-                            }
-                        }
-                        table.AddRow(projectName, projectId, adminCount.ToString(), adminEmails);
-                    }
-                    AnsiConsole.Write(table);
+                    usedOrg = $"https://{usedOrg.Trim().Trim('/')}";
                 }
-                return 0;
             }
-            catch (Exception ex)
+
+            AnsiConsole.MarkupLine($"[blue]Using organization:[/] {usedOrg}");
+
+            // 2. List projects
+            var projectsResult = _processRunner.Run("az", $"devops project list --org {usedOrg} --output json");
+            if (projectsResult.ExitCode != 0)
             {
-                AnsiConsole.MarkupLine($"[red]Exception:[/] {ex.Message}");
+                AnsiConsole.MarkupLine($"[red]Failed to list projects for org {usedOrg}[/]");
                 return 1;
             }
+            var projectNames = new List<string>();
+            try
+            {
+                var projectsJson = System.Text.Json.JsonDocument.Parse(projectsResult.Output);
+                if (projectsJson.RootElement.TryGetProperty("value", out var valueProp) && valueProp.ValueKind == System.Text.Json.JsonValueKind.Array)
+                {
+                    foreach (var proj in valueProp.EnumerateArray())
+                    {
+                        if (proj.TryGetProperty("name", out var nameProp))
+                        {
+                            var name = nameProp.GetString();
+                            if (!string.IsNullOrEmpty(name))
+                                projectNames.Add(name);
+                        }
+                    }
+                }
+            }
+            catch { }
+
+            // 3. Filter projects if needed
+            if (!string.IsNullOrWhiteSpace(settings.Projects))
+            {
+                var filter = settings.Projects.Split(',').Select(p => p.Trim()).ToHashSet(StringComparer.OrdinalIgnoreCase);
+                projectNames = projectNames.Where(p => filter.Contains(p)).ToList();
+            }
+
+            // 4. Output as a tree
+            AnsiConsole.MarkupLine($"[bold]Organization:[/] {usedOrg}");
+            var rootTree = new Tree("[yellow]🛡️ Azure DevOps Projects[/]");
+
+            foreach (var project in projectNames)
+            {
+                var projectNode = rootTree.AddNode($"[yellow]📁 {project}[/]");
+
+                // Admins
+                var admins = GetProjectAdminEmails(project, usedOrg);
+                var adminsNode = projectNode.AddNode("[blue]👤 Admins[/]");
+                if (admins.Count > 0)
+                {
+                    foreach (var admin in admins)
+                        adminsNode.AddNode($"[blue]{admin}[/]");
+                }
+                else
+                {
+                    adminsNode.AddNode("[grey]None[/]");
+                }
+
+                // Repos
+                if (settings.IncludeRepos)
+                {
+                    var repos = GetProjectRepos(project, usedOrg);
+                    var reposNode = projectNode.AddNode("[green]📦 Repos[/]");
+                    if (repos.Count > 0)
+                    {
+                        foreach (var repo in repos)
+                            reposNode.AddNode($"[green]{repo.Name}[/] [dim]({repo.MainBranchPolicyStatus})[/]");
+                    }
+                    else
+                    {
+                        reposNode.AddNode("[grey]None[/]");
+                    }
+                }
+
+                // Service Connections
+                if (settings.IncludeServiceConnections)
+                {
+                    var svcs = GetProjectServiceConnections(project, usedOrg);
+                    var svcNode = projectNode.AddNode("[magenta]🔗 Service Connections[/]");
+                    if (svcs.Count > 0)
+                    {
+                        foreach (var svc in svcs)
+                            svcNode.AddNode($"[magenta]{svc.Name}[/] [dim]({svc.Type})[/]");
+                    }
+                    else
+                    {
+                        svcNode.AddNode("[grey]None[/]");
+                    }
+                }
+            }
+
+            AnsiConsole.Write(rootTree);
+            return 0;
+        }
+
+        private List<string> GetProjectAdminEmails(string projectName, string usedOrg)
+        {
+            var emails = new List<string>();
+            var groupResult = _processRunner.Run(
+                "az",
+                $"devops security group list --project \"{projectName}\" --org {usedOrg} --output json");
+            string? adminDescriptor = null;
+            if (groupResult.ExitCode == 0)
+            {
+                try
+                {
+                    var groupJson = System.Text.Json.JsonDocument.Parse(groupResult.Output);
+                    foreach (var group in groupJson.RootElement.GetProperty("graphGroups").EnumerateArray())
+                    {
+                        if (group.GetProperty("displayName").GetString() == "Project Administrators")
+                        {
+                            adminDescriptor = group.GetProperty("descriptor").GetString();
+                            break;
+                        }
+                    }
+                }
+                catch { }
+            }
+            if (!string.IsNullOrEmpty(adminDescriptor))
+            {
+                var membersResult = _processRunner.Run(
+                    "az",
+                    $"devops security group membership list --id {adminDescriptor} --org {usedOrg} --output json");
+                if (membersResult.ExitCode == 0)
+                {
+                    try
+                    {
+                        var membersJson = System.Text.Json.JsonDocument.Parse(membersResult.Output);
+                        if (membersJson.RootElement.ValueKind == System.Text.Json.JsonValueKind.Object)
+                        {
+                            foreach (var member in membersJson.RootElement.EnumerateObject())
+                            {
+                                if (member.Value.TryGetProperty("mailAddress", out var emailProp))
+                                {
+                                    var email = emailProp.GetString();
+                                    if (!string.IsNullOrEmpty(email))
+                                        emails.Add(email);
+                                }
+                            }
+                        }
+                    }
+                    catch { }
+                }
+            }
+            return emails;
+        }
+
+        private List<RepoInfo> GetProjectRepos(string projectName, string usedOrg)
+        {
+            var repos = new List<RepoInfo>();
+            var reposResult = _processRunner.Run(
+                "az",
+                $"repos list --project \"{projectName}\" --org {usedOrg} --output json");
+            if (reposResult.ExitCode == 0)
+            {
+                try
+                {
+                    var reposJson = System.Text.Json.JsonDocument.Parse(reposResult.Output);
+                    if (reposJson.RootElement.ValueKind == System.Text.Json.JsonValueKind.Array && reposJson.RootElement.GetArrayLength() > 0)
+                    {
+                        foreach (var repo in reposJson.RootElement.EnumerateArray())
+                        {
+                            string? repoName = null;
+                            string? repoId = null;
+                            if (repo.TryGetProperty("name", out var nameProp))
+                                repoName = nameProp.GetString();
+                            if (repo.TryGetProperty("id", out var idProp))
+                                repoId = idProp.GetString();
+                            // Check branch policy for main branch
+                            string branch = "main";
+                            string policyStatus = "[red]✗[/]";
+                            if (!string.IsNullOrEmpty(repoId))
+                            {
+                                var policyResult = _processRunner.Run(
+                                    "az",
+                                    $"repos policy list --project \"{projectName}\" --org {usedOrg} --repository-id {repoId} --branch {branch} --output json");
+                                if (policyResult.ExitCode == 0)
+                                {
+                                    try
+                                    {
+                                        var policyJson = System.Text.Json.JsonDocument.Parse(policyResult.Output);
+                                        if (policyJson.RootElement.ValueKind == System.Text.Json.JsonValueKind.Array && policyJson.RootElement.GetArrayLength() > 0)
+                                        {
+                                            policyStatus = "[green]✔[/]";
+                                        }
+                                    }
+                                    catch { }
+                                }
+                            }
+                            repos.Add(new RepoInfo(repoName ?? "", repoId ?? "", policyStatus));
+                        }
+                    }
+                }
+                catch { }
+            }
+            return repos;
+        }
+
+        private List<ServiceConnectionInfo> GetProjectServiceConnections(string projectName, string usedOrg)
+        {
+            var list = new List<ServiceConnectionInfo>();
+            var svcResult = _processRunner.Run(
+                "az",
+                $"devops service-endpoint list --project \"{projectName}\" --org {usedOrg} --output json");
+            if (svcResult.ExitCode == 0)
+            {
+                try
+                {
+                    var svcJson = System.Text.Json.JsonDocument.Parse(svcResult.Output);
+                    if (svcJson.RootElement.ValueKind == System.Text.Json.JsonValueKind.Array && svcJson.RootElement.GetArrayLength() > 0)
+                    {
+                        foreach (var svc in svcJson.RootElement.EnumerateArray())
+                        {
+                            string? svcName = svc.TryGetProperty("name", out var n) ? n.GetString() : null;
+                            string? svcType = svc.TryGetProperty("type", out var t) ? t.GetString() : null;
+                            string? svcId = svc.TryGetProperty("id", out var i) ? i.GetString() : null;
+                            list.Add(new ServiceConnectionInfo(svcName ?? "", svcType ?? "", svcId ?? ""));
+                        }
+                    }
+                }
+                catch { }
+            }
+            return list;
         }
     }
 }
