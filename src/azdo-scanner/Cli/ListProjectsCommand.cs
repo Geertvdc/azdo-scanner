@@ -28,7 +28,7 @@ namespace AzdoScanner.Cli
         public bool IncludeRepos { get; set; }
     }
 
-    public class ListProjectsCommand : Command<ListProjectsCommandSettings>
+public class ListProjectsCommand : AsyncCommand<ListProjectsCommandSettings>
     {
         private readonly IProcessRunner _processRunner;
 
@@ -37,7 +37,7 @@ namespace AzdoScanner.Cli
             _processRunner = processRunner;
         }
 
-        public override int Execute(CommandContext context, ListProjectsCommandSettings settings)
+        public override async Task<int> ExecuteAsync(CommandContext context, ListProjectsCommandSettings settings)
         {
             // 1. Resolve organization
             string? usedOrg = settings.Organization;
@@ -77,16 +77,14 @@ namespace AzdoScanner.Cli
                 }
             }
 
-            AnsiConsole.MarkupLine($"[blue]Using organization:[/] {usedOrg}");
-
-            // 2. List projects
-            var projectsResult = _processRunner.Run("az", $"devops project list --org {usedOrg} --output json");
+            // 2. List projects (async)
+            List<string> projectNames = new();
+            var projectsResult = await Task.Run(() => _processRunner.Run("az", $"devops project list --org {usedOrg} --output json"));
             if (projectsResult.ExitCode != 0)
             {
                 AnsiConsole.MarkupLine($"[red]Failed to list projects for org {usedOrg}[/]");
                 return 1;
             }
-            var projectNames = new List<string>();
             try
             {
                 var projectsJson = System.Text.Json.JsonDocument.Parse(projectsResult.Output);
@@ -112,61 +110,88 @@ namespace AzdoScanner.Cli
                 projectNames = projectNames.Where(p => filter.Contains(p)).ToList();
             }
 
-            // 4. Output as a tree
             AnsiConsole.MarkupLine($"[bold]Organization:[/] {usedOrg}");
             var rootTree = new Tree("[yellow]🛡️ Azure DevOps Projects[/]");
+            var projectNodeMap = new Dictionary<string, TreeNode>();
 
-            foreach (var project in projectNames)
+            await AnsiConsole.Live(rootTree)
+                .AutoClear(false)
+                .StartAsync(async ctx =>
             {
-                var projectNode = rootTree.AddNode($"[yellow]📁 {project}[/]");
-
-                // Admins
-                var admins = GetProjectAdminEmails(project, usedOrg);
-                var adminsNode = projectNode.AddNode("[blue]👤 Admins[/]");
-                if (admins.Count > 0)
-                {
-                    foreach (var admin in admins)
-                        adminsNode.AddNode($"[blue]{admin}[/]");
-                }
-                else
-                {
-                    adminsNode.AddNode("[grey]None[/]");
-                }
-
-                // Repos
-                if (settings.IncludeRepos)
-                {
-                    var repos = GetProjectRepos(project, usedOrg);
-                    var reposNode = projectNode.AddNode("[green]📦 Repos[/]");
-                    if (repos.Count > 0)
+                var tasks = projectNames.Select(async project => {
+                    TreeNode projectNode;
+                    lock (rootTree)
                     {
-                        foreach (var repo in repos)
-                            reposNode.AddNode($"[green]{repo.Name}[/] [dim]({repo.MainBranchPolicyStatus})[/]");
+                        projectNode = rootTree.AddNode($"[yellow]📁 {project}[/]");
+                        projectNodeMap[project] = projectNode;
                     }
-                    else
-                    {
-                        reposNode.AddNode("[grey]None[/]");
-                    }
-                }
+                    ctx.Refresh();
 
-                // Service Connections
-                if (settings.IncludeServiceConnections)
-                {
-                    var svcs = GetProjectServiceConnections(project, usedOrg);
-                    var svcNode = projectNode.AddNode("[magenta]🔗 Service Connections[/]");
-                    if (svcs.Count > 0)
-                    {
-                        foreach (var svc in svcs)
-                            svcNode.AddNode($"[magenta]{svc.Name}[/] [dim]({svc.Type})[/]");
-                    }
-                    else
-                    {
-                        svcNode.AddNode("[grey]None[/]");
-                    }
-                }
-            }
+                    // Fetch data in parallel
+                    var adminsTask = Task.Run(() => GetProjectAdminEmails(project, usedOrg));
+                    var reposTask = settings.IncludeRepos ? Task.Run(() => GetProjectRepos(project, usedOrg)) : Task.FromResult(new List<RepoInfo>());
+                    var svcsTask = settings.IncludeServiceConnections ? Task.Run(() => GetProjectServiceConnections(project, usedOrg)) : Task.FromResult(new List<ServiceConnectionInfo>());
 
-            AnsiConsole.Write(rootTree);
+                    // Admins
+                    var admins = await adminsTask;
+                    lock (rootTree)
+                    {
+                        var adminsNode = projectNode.AddNode(new Markup("[blue]👤 Admins[/]"));
+                        if (admins.Count > 0)
+                        {
+                            foreach (var admin in admins)
+                                adminsNode.AddNode(new Markup($"[blue]{admin}[/]"));
+                        }
+                        else
+                        {
+                            adminsNode.AddNode(new Markup("[grey]None[/]"));
+                        }
+                    }
+                    ctx.Refresh();
+
+                    // Repos
+                    var repos = await reposTask;
+                    if (settings.IncludeRepos)
+                    {
+                        lock (rootTree)
+                        {
+                            var reposNode = projectNode.AddNode(new Markup("[green]📦 Repos[/]"));
+                            if (repos.Count > 0)
+                            {
+                                foreach (var repo in repos)
+                                    reposNode.AddNode(new Markup($"[green]{repo.Name}[/] [dim]({repo.MainBranchPolicyStatus})[/]"));
+                            }
+                            else
+                            {
+                                reposNode.AddNode(new Markup("[grey]None[/]"));
+                            }
+                        }
+                        ctx.Refresh();
+                    }
+
+                    // Service Connections
+                    var svcs = await svcsTask;
+                    if (settings.IncludeServiceConnections)
+                    {
+                        lock (rootTree)
+                        {
+                            var svcNode = projectNode.AddNode(new Markup("[magenta]🔗 Service Connections[/]"));
+                            if (svcs.Count > 0)
+                            {
+                                foreach (var svc in svcs)
+                                    svcNode.AddNode(new Markup($"[magenta]{svc.Name}[/] [dim]({svc.Type})[/]"));
+                            }
+                            else
+                            {
+                                svcNode.AddNode(new Markup("[grey]None[/]"));
+                            }
+                        }
+                        ctx.Refresh();
+                    }
+                }).ToList();
+
+                await Task.WhenAll(tasks);
+            });
             return 0;
         }
 
