@@ -46,6 +46,7 @@ public class ListProjectsCommand : AsyncCommand<ListProjectsCommandSettings>
                 cts.Cancel();
                 AnsiConsole.MarkupLine("[yellow]Cancellation requested. Exiting...[/]");
             };
+            // ... rest of method ...
             // 1. Resolve organization
             string? usedOrg = settings.Organization;
             if (string.IsNullOrWhiteSpace(usedOrg))
@@ -89,7 +90,7 @@ public class ListProjectsCommand : AsyncCommand<ListProjectsCommandSettings>
 
             // 2. List projects (async)
             List<string> projectNames = new();
-            var projectsResult = await Task.Run(() => _processRunner.Run("az", $"devops project list --org {usedOrg} --output json"));
+            var projectsResult = await Task.Run(() => _processRunner.Run("az", $"devops project list --org {usedOrg} --output json"), cts.Token).ConfigureAwait(false);
             if (projectsResult.ExitCode != 0)
             {
                 AnsiConsole.MarkupLine($"[red]Failed to list projects for org {usedOrg}[/]");
@@ -114,7 +115,8 @@ public class ListProjectsCommand : AsyncCommand<ListProjectsCommandSettings>
             }
             catch (Exception ex)
             {
-                AnsiConsole.MarkupLine($"[yellow]Warning: Failed to parse project list: {ex.Message}[/]");
+                AnsiConsole.MarkupLine($"[red]Failed to parse project list: {ex.Message}[/]");
+                return 1
             }
 
             // 3. Filter projects if needed
@@ -125,114 +127,97 @@ public class ListProjectsCommand : AsyncCommand<ListProjectsCommandSettings>
             }
 
             AnsiConsole.MarkupLine($"[bold]Organization:[/] {usedOrg}");
-            var rootTree = new Tree("[yellow]🛡️ Azure DevOps Projects[/]");
+            var rootTree = new Tree("[yellow]Azure DevOps Projects[/]");
             var projectNodeMap = new Dictionary<string, TreeNode>();
 
             var spinner = Spinner.Known.Dots;
-            int spinnerFrame = 0;
             await AnsiConsole.Live(new Panel(rootTree))
                 .AutoClear(false)
                 .StartAsync(async ctx =>
-            {
-                for (int i = 0; i < projectNames.Count; i++)
                 {
-                    if (cts.Token.IsCancellationRequested)
-                        break;
-
-                    var project = projectNames[i];
-                    TreeNode? projectNode = null;
-                    lock (rootTree)
+                    // Helper to run a spinner with a dynamic message and action
+                    async Task RunWithSpinnerAsync(Func<Task> action, Func<string> getMessage)
                     {
-                        projectNode = rootTree.AddNode(new Markup($"[yellow]📁 {project}[/]"));
+                        bool done = false;
+                        int frame = 0;
+                        var spinnerTask = Task.Run(async () =>
+                        {
+                            while (!done && !cts.Token.IsCancellationRequested)
+                            {
+                                var spinnerFrame = spinner.Frames[frame];
+                                var spinnerMarkup = $"[grey]{spinnerFrame} {getMessage()}[/]";
+                                ctx.UpdateTarget(new Rows(new IRenderable[] { rootTree, new Markup(spinnerMarkup) }));
+                                frame = (frame + 1) % spinner.Frames.Count;
+                                await Task.Delay(spinner.Interval, cts.Token).ConfigureAwait(false);
+                            }
+                        }, cts.Token);
+
+                        try
+                        {
+                            await action().ConfigureAwait(false);
+                        }
+                        finally
+                        {
+                            done = true;
+                            try { await spinnerTask.ConfigureAwait(false); } catch { /* ignore */ }
+                            ctx.UpdateTarget(rootTree);
+                            ctx.Refresh();
+                        }
+                    }
+
+                    for (int i = 0; i < projectNames.Count; i++)
+                    {
+                        if (cts.Token.IsCancellationRequested)
+                            break;
+
+                        var project = projectNames[i];
+                        TreeNode? projectNode = rootTree.AddNode(new Markup($"[yellow]📁 {project}[/]"));
                         projectNodeMap[project] = projectNode;
-                    }
-                    ctx.Refresh();
-
-                    // Animate default spinner below the tree while loading
-                    bool done = false;
-                    string spinnerMessage = $"Loading admins for project '{project}'...";
-                    var spinnerTask = Task.Run(async () => {
-                        while (!done && !cts.Token.IsCancellationRequested)
-                        {
-                            var frame = spinner.Frames[spinnerFrame];
-                            var spinnerMarkup = $"[grey]{frame} {spinnerMessage}[/]";
-                            ctx.UpdateTarget(new Rows(new IRenderable[] {
-                                rootTree,
-                                new Markup(spinnerMarkup)
-                            }));
-                            spinnerFrame = (spinnerFrame + 1) % spinner.Frames.Count;
-                            await Task.Delay(spinner.Interval);
-                        }
-                    });
-
-                    // Fetch data sequentially
-                    spinnerMessage = $"Loading admins for project '{project}'...";
-                    var admins = GetProjectAdminEmails(project, usedOrg);
-                    lock (rootTree)
-                    {
-                        var adminsNode = projectNode.AddNode(new Markup("[blue]👤 Admins[/]"));
-                        if (admins.Count > 0)
-                        {
-                            foreach (var admin in admins)
-                                adminsNode.AddNode(new Markup($"[blue]{admin}[/]"));
-                        }
-                        else
-                        {
-                            adminsNode.AddNode(new Markup("[grey]None[/]"));
-                        }
-                    }
-                    ctx.Refresh();
-
-                    List<RepoInfo> repos = new();
-                    if (settings.IncludeRepos)
-                    {
-                        spinnerMessage = $"Loading repositories for project '{project}'...";
-                        repos = GetProjectRepos(project, usedOrg);
-                        lock (rootTree)
-                        {
-                            var reposNode = projectNode.AddNode(new Markup("[green]📦 Repos[/]"));
-                            if (repos.Count > 0)
-                            {
-                                foreach (var repo in repos)
-                                    reposNode.AddNode(new Markup($"[green]{repo.Name}[/] [dim]({repo.MainBranchPolicyStatus})[/]"));
-                            }
-                            else
-                            {
-                                reposNode.AddNode(new Markup("[grey]None[/]"));
-                            }
-                        }
                         ctx.Refresh();
-                    }
 
-                    List<ServiceConnectionInfo> svcs = new();
-                    if (settings.IncludeServiceConnections)
-                    {
-                        spinnerMessage = $"Loading service connections for project '{project}'...";
-                        svcs = GetProjectServiceConnections(project, usedOrg);
-                        lock (rootTree)
+                        await RunWithSpinnerAsync(async () =>
                         {
-                            var svcNode = projectNode.AddNode(new Markup("[magenta]🔗 Service Connections[/]"));
-                            if (svcs.Count > 0)
-                            {
-                                foreach (var svc in svcs)
-                                    svcNode.AddNode(new Markup($"[magenta]{svc.Name}[/] [dim]({svc.Type})[/]"));
-                            }
+                            var admins = await Task.Run(() => GetProjectAdminEmails(project, usedOrg), cts.Token).ConfigureAwait(false);
+                            var adminsNode = projectNode.AddNode(new Markup("[blue]👤 Admins[/]"));
+                            if (admins.Count > 0)
+                                foreach (var admin in admins)
+                                    adminsNode.AddNode(new Markup($"[blue]{admin}[/]"));
                             else
-                            {
-                                svcNode.AddNode(new Markup("[grey]None[/]"));
-                            }
-                        }
-                        ctx.Refresh();
-                    }
+                                adminsNode.AddNode(new Markup("[grey]None[/]"));
+                            ctx.Refresh();
+                        }, () => $"Loading admins for project '{project}'...");
 
-                    // Remove spinner and set final label
-                    done = true;
-                    await spinnerTask;
-                    // After finishing, update the panel to just show the tree (no spinner)
-                    ctx.UpdateTarget(rootTree);
-                    ctx.Refresh();
-                }
-            });
+                        if (settings.IncludeRepos)
+                        {
+                            await RunWithSpinnerAsync(async () =>
+                            {
+                                var repos = await Task.Run(() => GetProjectRepos(project, usedOrg), cts.Token).ConfigureAwait(false);
+                                var reposNode = projectNode.AddNode(new Markup("[green]📦 Repos[/]"));
+                                if (repos.Count > 0)
+                                    foreach (var repo in repos)
+                                        reposNode.AddNode(new Markup($"[green]{repo.Name}[/] [dim]({repo.MainBranchPolicyStatus})[/]"));
+                                else
+                                    reposNode.AddNode(new Markup("[grey]None[/]"));
+                                ctx.Refresh();
+                            }, () => $"Loading repositories for project '{project}'...");
+                        }
+
+                        if (settings.IncludeServiceConnections)
+                        {
+                            await RunWithSpinnerAsync(async () =>
+                            {
+                                var svcs = await Task.Run(() => GetProjectServiceConnections(project, usedOrg), cts.Token).ConfigureAwait(false);
+                                var svcNode = projectNode.AddNode(new Markup("[magenta]🔗 Service Connections[/]"));
+                                if (svcs.Count > 0)
+                                    foreach (var svc in svcs)
+                                        svcNode.AddNode(new Markup($"[magenta]{svc.Name}[/] [dim]({svc.Type})[/]"));
+                                else
+                                    svcNode.AddNode(new Markup("[grey]None[/]"));
+                                ctx.Refresh();
+                            }, () => $"Loading service connections for project '{project}'...");
+                        }
+                    }
+                });
             return 0;
         }
 
