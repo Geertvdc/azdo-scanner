@@ -1,4 +1,5 @@
 using Spectre.Console;
+using Spectre.Console.Rendering;
 using Spectre.Console.Cli;
 using System.ComponentModel;
 using AzdoScanner.Core;
@@ -39,6 +40,12 @@ public class ListProjectsCommand : AsyncCommand<ListProjectsCommandSettings>
 
         public override async Task<int> ExecuteAsync(CommandContext context, ListProjectsCommandSettings settings)
         {
+            using var cts = new System.Threading.CancellationTokenSource();
+            Console.CancelKeyPress += (s, e) => {
+                e.Cancel = true;
+                cts.Cancel();
+                AnsiConsole.MarkupLine("[yellow]Cancellation requested. Exiting...[/]");
+            };
             // 1. Resolve organization
             string? usedOrg = settings.Organization;
             if (string.IsNullOrWhiteSpace(usedOrg))
@@ -54,7 +61,10 @@ public class ListProjectsCommand : AsyncCommand<ListProjectsCommandSettings>
                             usedOrg = orgProp.GetString() ?? "";
                         }
                     }
-                    catch { }
+                    catch (Exception ex)
+                    {
+                        AnsiConsole.MarkupLine($"[yellow]Warning: Failed to parse organization from az config: {ex.Message}[/]");
+                    }
                 }
             }
             if (string.IsNullOrWhiteSpace(usedOrg))
@@ -87,6 +97,7 @@ public class ListProjectsCommand : AsyncCommand<ListProjectsCommandSettings>
             }
             try
             {
+
                 var projectsJson = System.Text.Json.JsonDocument.Parse(projectsResult.Output);
                 if (projectsJson.RootElement.TryGetProperty("value", out var valueProp) && valueProp.ValueKind == System.Text.Json.JsonValueKind.Array)
                 {
@@ -101,7 +112,10 @@ public class ListProjectsCommand : AsyncCommand<ListProjectsCommandSettings>
                     }
                 }
             }
-            catch { }
+            catch (Exception ex)
+            {
+                AnsiConsole.MarkupLine($"[yellow]Warning: Failed to parse project list: {ex.Message}[/]");
+            }
 
             // 3. Filter projects if needed
             if (!string.IsNullOrWhiteSpace(settings.Projects))
@@ -114,26 +128,46 @@ public class ListProjectsCommand : AsyncCommand<ListProjectsCommandSettings>
             var rootTree = new Tree("[yellow]🛡️ Azure DevOps Projects[/]");
             var projectNodeMap = new Dictionary<string, TreeNode>();
 
-            await AnsiConsole.Live(rootTree)
+            var spinner = Spinner.Known.Dots;
+            int spinnerFrame = 0;
+            await AnsiConsole.Live(new Panel(rootTree))
                 .AutoClear(false)
                 .StartAsync(async ctx =>
             {
-                var tasks = projectNames.Select(async project => {
-                    TreeNode projectNode;
+                for (int i = 0; i < projectNames.Count; i++)
+                {
+                    if (cts.Token.IsCancellationRequested)
+                        break;
+
+                    var project = projectNames[i];
+                    TreeNode? projectNode = null;
                     lock (rootTree)
                     {
-                        projectNode = rootTree.AddNode($"[yellow]📁 {project}[/]");
+                        projectNode = rootTree.AddNode(new Markup($"[yellow]📁 {project}[/]"));
                         projectNodeMap[project] = projectNode;
                     }
                     ctx.Refresh();
 
-                    // Fetch data in parallel
-                    var adminsTask = Task.Run(() => GetProjectAdminEmails(project, usedOrg));
-                    var reposTask = settings.IncludeRepos ? Task.Run(() => GetProjectRepos(project, usedOrg)) : Task.FromResult(new List<RepoInfo>());
-                    var svcsTask = settings.IncludeServiceConnections ? Task.Run(() => GetProjectServiceConnections(project, usedOrg)) : Task.FromResult(new List<ServiceConnectionInfo>());
+                    // Animate default spinner below the tree while loading
+                    bool done = false;
+                    string spinnerMessage = $"Loading admins for project '{project}'...";
+                    var spinnerTask = Task.Run(async () => {
+                        while (!done && !cts.Token.IsCancellationRequested)
+                        {
+                            var frame = spinner.Frames[spinnerFrame];
+                            var spinnerMarkup = $"[grey]{frame} {spinnerMessage}[/]";
+                            ctx.UpdateTarget(new Rows(new IRenderable[] {
+                                rootTree,
+                                new Markup(spinnerMarkup)
+                            }));
+                            spinnerFrame = (spinnerFrame + 1) % spinner.Frames.Count;
+                            await Task.Delay(spinner.Interval);
+                        }
+                    });
 
-                    // Admins
-                    var admins = await adminsTask;
+                    // Fetch data sequentially
+                    spinnerMessage = $"Loading admins for project '{project}'...";
+                    var admins = GetProjectAdminEmails(project, usedOrg);
                     lock (rootTree)
                     {
                         var adminsNode = projectNode.AddNode(new Markup("[blue]👤 Admins[/]"));
@@ -149,10 +183,11 @@ public class ListProjectsCommand : AsyncCommand<ListProjectsCommandSettings>
                     }
                     ctx.Refresh();
 
-                    // Repos
-                    var repos = await reposTask;
+                    List<RepoInfo> repos = new();
                     if (settings.IncludeRepos)
                     {
+                        spinnerMessage = $"Loading repositories for project '{project}'...";
+                        repos = GetProjectRepos(project, usedOrg);
                         lock (rootTree)
                         {
                             var reposNode = projectNode.AddNode(new Markup("[green]📦 Repos[/]"));
@@ -169,10 +204,11 @@ public class ListProjectsCommand : AsyncCommand<ListProjectsCommandSettings>
                         ctx.Refresh();
                     }
 
-                    // Service Connections
-                    var svcs = await svcsTask;
+                    List<ServiceConnectionInfo> svcs = new();
                     if (settings.IncludeServiceConnections)
                     {
+                        spinnerMessage = $"Loading service connections for project '{project}'...";
+                        svcs = GetProjectServiceConnections(project, usedOrg);
                         lock (rootTree)
                         {
                             var svcNode = projectNode.AddNode(new Markup("[magenta]🔗 Service Connections[/]"));
@@ -188,9 +224,14 @@ public class ListProjectsCommand : AsyncCommand<ListProjectsCommandSettings>
                         }
                         ctx.Refresh();
                     }
-                }).ToList();
 
-                await Task.WhenAll(tasks);
+                    // Remove spinner and set final label
+                    done = true;
+                    await spinnerTask;
+                    // After finishing, update the panel to just show the tree (no spinner)
+                    ctx.UpdateTarget(rootTree);
+                    ctx.Refresh();
+                }
             });
             return 0;
         }
@@ -198,51 +239,64 @@ public class ListProjectsCommand : AsyncCommand<ListProjectsCommandSettings>
         private List<string> GetProjectAdminEmails(string projectName, string usedOrg)
         {
             var emails = new List<string>();
-            var groupResult = _processRunner.Run(
-                "az",
-                $"devops security group list --project \"{projectName}\" --org {usedOrg} --output json");
-            string? adminDescriptor = null;
-            if (groupResult.ExitCode == 0)
+            try
             {
-                try
-                {
-                    var groupJson = System.Text.Json.JsonDocument.Parse(groupResult.Output);
-                    foreach (var group in groupJson.RootElement.GetProperty("graphGroups").EnumerateArray())
-                    {
-                        if (group.GetProperty("displayName").GetString() == "Project Administrators")
-                        {
-                            adminDescriptor = group.GetProperty("descriptor").GetString();
-                            break;
-                        }
-                    }
-                }
-                catch { }
-            }
-            if (!string.IsNullOrEmpty(adminDescriptor))
-            {
-                var membersResult = _processRunner.Run(
+                var groupResult = _processRunner.Run(
                     "az",
-                    $"devops security group membership list --id {adminDescriptor} --org {usedOrg} --output json");
-                if (membersResult.ExitCode == 0)
+                    $"devops security group list --project \"{projectName}\" --org {usedOrg} --output json");
+                string? adminDescriptor = null;
+                if (groupResult.ExitCode == 0)
                 {
                     try
                     {
-                        var membersJson = System.Text.Json.JsonDocument.Parse(membersResult.Output);
-                        if (membersJson.RootElement.ValueKind == System.Text.Json.JsonValueKind.Object)
+                        var groupJson = System.Text.Json.JsonDocument.Parse(groupResult.Output);
+                        foreach (var group in groupJson.RootElement.GetProperty("graphGroups").EnumerateArray())
                         {
-                            foreach (var member in membersJson.RootElement.EnumerateObject())
+                            if (group.GetProperty("displayName").GetString() == "Project Administrators")
                             {
-                                if (member.Value.TryGetProperty("mailAddress", out var emailProp))
-                                {
-                                    var email = emailProp.GetString();
-                                    if (!string.IsNullOrEmpty(email))
-                                        emails.Add(email);
-                                }
+                                adminDescriptor = group.GetProperty("descriptor").GetString();
+                                break;
                             }
                         }
                     }
-                    catch { }
+                    catch (Exception ex)
+                    {
+                        AnsiConsole.MarkupLine($"[yellow]Warning: Failed to parse admin group for project {projectName}: {ex.Message}[/]");
+                    }
                 }
+                if (!string.IsNullOrEmpty(adminDescriptor))
+                {
+                    var membersResult = _processRunner.Run(
+                        "az",
+                        $"devops security group membership list --id {adminDescriptor} --org {usedOrg} --output json");
+                    if (membersResult.ExitCode == 0)
+                    {
+                        try
+                        {
+                            var membersJson = System.Text.Json.JsonDocument.Parse(membersResult.Output);
+                            if (membersJson.RootElement.ValueKind == System.Text.Json.JsonValueKind.Object)
+                            {
+                                foreach (var member in membersJson.RootElement.EnumerateObject())
+                                {
+                                    if (member.Value.TryGetProperty("mailAddress", out var emailProp))
+                                    {
+                                        var email = emailProp.GetString();
+                                        if (!string.IsNullOrEmpty(email))
+                                            emails.Add(email);
+                                    }
+                                }
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            AnsiConsole.MarkupLine($"[yellow]Warning: Failed to parse admin members for project {projectName}: {ex.Message}[/]");
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                AnsiConsole.MarkupLine($"[yellow]Warning: Failed to fetch admin emails for project {projectName}: {ex.Message}[/]");
             }
             return emails;
         }
@@ -250,50 +304,63 @@ public class ListProjectsCommand : AsyncCommand<ListProjectsCommandSettings>
         private List<RepoInfo> GetProjectRepos(string projectName, string usedOrg)
         {
             var repos = new List<RepoInfo>();
-            var reposResult = _processRunner.Run(
-                "az",
-                $"repos list --project \"{projectName}\" --org {usedOrg} --output json");
-            if (reposResult.ExitCode == 0)
+            try
             {
-                try
+                var reposResult = _processRunner.Run(
+                    "az",
+                    $"repos list --project \"{projectName}\" --org {usedOrg} --output json");
+                if (reposResult.ExitCode == 0)
                 {
-                    var reposJson = System.Text.Json.JsonDocument.Parse(reposResult.Output);
-                    if (reposJson.RootElement.ValueKind == System.Text.Json.JsonValueKind.Array && reposJson.RootElement.GetArrayLength() > 0)
+                    try
                     {
-                        foreach (var repo in reposJson.RootElement.EnumerateArray())
+                        var reposJson = System.Text.Json.JsonDocument.Parse(reposResult.Output);
+                        if (reposJson.RootElement.ValueKind == System.Text.Json.JsonValueKind.Array && reposJson.RootElement.GetArrayLength() > 0)
                         {
-                            string? repoName = null;
-                            string? repoId = null;
-                            if (repo.TryGetProperty("name", out var nameProp))
-                                repoName = nameProp.GetString();
-                            if (repo.TryGetProperty("id", out var idProp))
-                                repoId = idProp.GetString();
-                            // Check branch policy for main branch
-                            string branch = "main";
-                            string policyStatus = "[red]✗[/]";
-                            if (!string.IsNullOrEmpty(repoId))
+                            foreach (var repo in reposJson.RootElement.EnumerateArray())
                             {
-                                var policyResult = _processRunner.Run(
-                                    "az",
-                                    $"repos policy list --project \"{projectName}\" --org {usedOrg} --repository-id {repoId} --branch {branch} --output json");
-                                if (policyResult.ExitCode == 0)
+                                string? repoName = null;
+                                string? repoId = null;
+                                if (repo.TryGetProperty("name", out var nameProp))
+                                    repoName = nameProp.GetString();
+                                if (repo.TryGetProperty("id", out var idProp))
+                                    repoId = idProp.GetString();
+                                // Check branch policy for main branch
+                                string branch = "main";
+                                string policyStatus = "[red]✗[/]";
+                                if (!string.IsNullOrEmpty(repoId))
                                 {
-                                    try
+                                    var policyResult = _processRunner.Run(
+                                        "az",
+                                        $"repos policy list --project \"{projectName}\" --org {usedOrg} --repository-id {repoId} --branch {branch} --output json");
+                                    if (policyResult.ExitCode == 0)
                                     {
-                                        var policyJson = System.Text.Json.JsonDocument.Parse(policyResult.Output);
-                                        if (policyJson.RootElement.ValueKind == System.Text.Json.JsonValueKind.Array && policyJson.RootElement.GetArrayLength() > 0)
+                                        try
                                         {
-                                            policyStatus = "[green]✔[/]";
+                                            var policyJson = System.Text.Json.JsonDocument.Parse(policyResult.Output);
+                                            if (policyJson.RootElement.ValueKind == System.Text.Json.JsonValueKind.Array && policyJson.RootElement.GetArrayLength() > 0)
+                                            {
+                                                policyStatus = "[green]✔[/]";
+                                            }
+                                        }
+                                        catch (Exception ex)
+                                        {
+                                            AnsiConsole.MarkupLine($"[yellow]Warning: Failed to parse branch policy for repo {repoName} in project {projectName}: {ex.Message}[/]");
                                         }
                                     }
-                                    catch { }
                                 }
+                                repos.Add(new RepoInfo(repoName ?? "", repoId ?? "", policyStatus));
                             }
-                            repos.Add(new RepoInfo(repoName ?? "", repoId ?? "", policyStatus));
                         }
                     }
+                    catch (Exception ex)
+                    {
+                        AnsiConsole.MarkupLine($"[yellow]Warning: Failed to parse repos for project {projectName}: {ex.Message}[/]");
+                    }
                 }
-                catch { }
+            }
+            catch (Exception ex)
+            {
+                AnsiConsole.MarkupLine($"[yellow]Warning: Failed to fetch repos for project {projectName}: {ex.Message}[/]");
             }
             return repos;
         }
@@ -301,26 +368,36 @@ public class ListProjectsCommand : AsyncCommand<ListProjectsCommandSettings>
         private List<ServiceConnectionInfo> GetProjectServiceConnections(string projectName, string usedOrg)
         {
             var list = new List<ServiceConnectionInfo>();
-            var svcResult = _processRunner.Run(
-                "az",
-                $"devops service-endpoint list --project \"{projectName}\" --org {usedOrg} --output json");
-            if (svcResult.ExitCode == 0)
+            try
             {
-                try
+                var svcResult = _processRunner.Run(
+                    "az",
+                    $"devops service-endpoint list --project \"{projectName}\" --org {usedOrg} --output json");
+                if (svcResult.ExitCode == 0)
                 {
-                    var svcJson = System.Text.Json.JsonDocument.Parse(svcResult.Output);
-                    if (svcJson.RootElement.ValueKind == System.Text.Json.JsonValueKind.Array && svcJson.RootElement.GetArrayLength() > 0)
+                    try
                     {
-                        foreach (var svc in svcJson.RootElement.EnumerateArray())
+                        var svcJson = System.Text.Json.JsonDocument.Parse(svcResult.Output);
+                        if (svcJson.RootElement.ValueKind == System.Text.Json.JsonValueKind.Array && svcJson.RootElement.GetArrayLength() > 0)
                         {
-                            string? svcName = svc.TryGetProperty("name", out var n) ? n.GetString() : null;
-                            string? svcType = svc.TryGetProperty("type", out var t) ? t.GetString() : null;
-                            string? svcId = svc.TryGetProperty("id", out var i) ? i.GetString() : null;
-                            list.Add(new ServiceConnectionInfo(svcName ?? "", svcType ?? "", svcId ?? ""));
+                            foreach (var svc in svcJson.RootElement.EnumerateArray())
+                            {
+                                string? svcName = svc.TryGetProperty("name", out var n) ? n.GetString() : null;
+                                string? svcType = svc.TryGetProperty("type", out var t) ? t.GetString() : null;
+                                string? svcId = svc.TryGetProperty("id", out var i) ? i.GetString() : null;
+                                list.Add(new ServiceConnectionInfo(svcName ?? "", svcType ?? "", svcId ?? ""));
+                            }
                         }
                     }
+                    catch (Exception ex)
+                    {
+                        AnsiConsole.MarkupLine($"[yellow]Warning: Failed to parse service connections for project {projectName}: {ex.Message}[/]");
+                    }
                 }
-                catch { }
+            }
+            catch (Exception ex)
+            {
+                AnsiConsole.MarkupLine($"[yellow]Warning: Failed to fetch service connections for project {projectName}: {ex.Message}[/]");
             }
             return list;
         }
