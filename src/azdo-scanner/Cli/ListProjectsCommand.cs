@@ -193,12 +193,32 @@ namespace AzdoScanner.Cli
                             await RunWithSpinnerAsync(async () =>
                             {
                                 var repos = await Task.Run(() => GetProjectRepos(project, usedOrg), cts.Token).ConfigureAwait(false);
-                                var reposNode = projectNode.AddNode(new Markup("[green]📦 Repos[/]"));
+                                var reposNode = projectNode.AddNode(new Markup("[deepskyblue1]📦 Repos[/]"));
                                 if (repos.Count > 0)
+                                {
                                     foreach (var repo in repos)
-                                        reposNode.AddNode(new Markup($"[green]{repo.Name}[/] [dim]({repo.MainBranchPolicyStatus})[/]"));
+                                    {
+                                        var repoNode = reposNode.AddNode(new Markup($"[deepskyblue1]{repo.Name}[/]"));
+                                        // Split the policy status into individual lines (checks)
+                                        var checks = repo.MainBranchPolicyStatus.Split('\n');
+                                        if (checks.Length == 1 && checks[0].Contains("✔ All checks passed"))
+                                        {
+                                            repoNode.AddNode(new Markup("[green]✔ All checks passed[/]"));
+                                        }
+                                        else
+                                        {
+                                            foreach (var check in checks)
+                                            {
+                                                if (!string.IsNullOrWhiteSpace(check))
+                                                    repoNode.AddNode(new Markup(check));
+                                            }
+                                        }
+                                    }
+                                }
                                 else
+                                {
                                     reposNode.AddNode(new Markup("[grey]None[/]"));
+                                }
                                 ctx.Refresh();
                             }, () => $"Loading repositories for project '{project}'...");
                         }
@@ -312,8 +332,7 @@ namespace AzdoScanner.Cli
                                     repoId = idProp.GetString();
                                 // Check branch policy for main branch
                                 string branch = "main";
-                                string policyStatus = "[red]✗ No branch policy[/]";
-                                List<string> policyIssues = new();
+                                List<string> policyChecks = new();
                                 if (!string.IsNullOrEmpty(repoId))
                                 {
                                     var policyResult = _processRunner.Run(
@@ -327,6 +346,12 @@ namespace AzdoScanner.Cli
                                             if (policyJson.RootElement.ValueKind == System.Text.Json.JsonValueKind.Array && policyJson.RootElement.GetArrayLength() > 0)
                                             {
                                                 bool foundRequiredReviewers = false;
+                                                bool hasMinReviewers = false;
+                                                bool prohibitsLastPusher = false;
+                                                bool policyEnabled = false;
+                                                bool requireVoteOnLastIteration = false;
+                                                bool requireVoteOnEachIteration = false;
+                                                bool resetRejectionsOnSourcePush = false;
                                                 foreach (var policy in policyJson.RootElement.EnumerateArray())
                                                 {
                                                     if (policy.TryGetProperty("type", out var typeProp) &&
@@ -337,20 +362,15 @@ namespace AzdoScanner.Cli
                                                         // All relevant settings are under the "settings" property
                                                         if (policy.TryGetProperty("settings", out var settingsProp))
                                                         {
-                                                            // minimumApproverCount must be 1 or more
                                                             if (settingsProp.TryGetProperty("minimumApproverCount", out var minApproverCountValue))
                                                             {
-                                                                if (minApproverCountValue.ValueKind == System.Text.Json.JsonValueKind.Number && minApproverCountValue.GetInt32() < 1)
+                                                                if (minApproverCountValue.ValueKind == System.Text.Json.JsonValueKind.Number && minApproverCountValue.GetInt32() >= 1)
                                                                 {
-                                                                    policyIssues.Add("[red]✗ Minimum number of reviewers is less than 1[/]");
+                                                                    hasMinReviewers = true;
                                                                 }
                                                             }
-                                                            else
-                                                            {
-                                                                policyIssues.Add("[red]✗ Minimum number of reviewers setting missing[/]");
-                                                            }
 
-                                                            // blockLastPusherVote must be false
+                                                            // blockLastPusherVote must be true
                                                             if (settingsProp.TryGetProperty("blockLastPusherVote", out var blockLastPusherVoteValue))
                                                             {
                                                                 bool blockLastPusherVoteEnabled = false;
@@ -359,21 +379,13 @@ namespace AzdoScanner.Cli
                                                                 else if (blockLastPusherVoteValue.ValueKind == System.Text.Json.JsonValueKind.String &&
                                                                          string.Equals(blockLastPusherVoteValue.GetString(), "true", System.StringComparison.OrdinalIgnoreCase))
                                                                     blockLastPusherVoteEnabled = true;
-                                                                if (!blockLastPusherVoteEnabled)
+                                                                if (blockLastPusherVoteEnabled)
                                                                 {
-                                                                    policyIssues.Add("[red]✗ Prohibit most recent pusher (blockLastPusherVote) must be true[/]");
+                                                                    prohibitsLastPusher = true;
                                                                 }
-                                                            }
-                                                            else
-                                                            {
-                                                                policyIssues.Add("[red]✗ Prohibit most recent pusher (blockLastPusherVote) setting missing[/]");
                                                             }
 
                                                             // At least one of requireVoteOnLastIteration, requireVoteOnEachIteration, resetRejectionsOnSourcePush must be true
-                                                            bool requireVoteOnLastIteration = false;
-                                                            bool requireVoteOnEachIteration = false;
-                                                            bool resetRejectionsOnSourcePush = false;
-
                                                             if (settingsProp.TryGetProperty("requireVoteOnLastIteration", out var requireVoteOnLastIterationValue))
                                                             {
                                                                 if ((requireVoteOnLastIterationValue.ValueKind == System.Text.Json.JsonValueKind.True) ||
@@ -401,43 +413,44 @@ namespace AzdoScanner.Cli
                                                                     resetRejectionsOnSourcePush = true;
                                                                 }
                                                             }
-                                                            if (!(requireVoteOnLastIteration || requireVoteOnEachIteration || resetRejectionsOnSourcePush))
-                                                            {
-                                                                policyIssues.Add("[red]✗ At least one of requireVoteOnLastIteration, requireVoteOnEachIteration, or resetRejectionsOnSourcePush must be true[/]");
-                                                            }
                                                         }
-                                                        else
+                                                    }
+                                                    // Check if policy is enabled
+                                                    if (policy.TryGetProperty("isEnabled", out var isEnabledProp))
+                                                    {
+                                                        if (isEnabledProp.ValueKind == System.Text.Json.JsonValueKind.True && isEnabledProp.GetBoolean())
                                                         {
-                                                            policyIssues.Add("[red]✗ Policy settings missing[/]");
-                                                        }
-
-                                                        if (policy.TryGetProperty("isEnabled", out var isEnabledProp))
-                                                        {
-                                                            if (!isEnabledProp.GetBoolean())
-                                                                policyIssues.Add("[red]✗ Policy is not enabled[/]");
-                                                        }
-                                                        else
-                                                        {
-                                                            policyIssues.Add("[red]✗ Policy enabled setting missing[/]");
+                                                            policyEnabled = true;
                                                         }
                                                     }
                                                 }
-                                                if (!foundRequiredReviewers)
+                                                // Now, add green/red lines for each check
+                                                if (foundRequiredReviewers && policyEnabled)
                                                 {
-                                                    policyIssues.Add("[red]✗ No 'Minimum number of reviewers' policy found[/]");
-                                                }
-                                                if (policyIssues.Count == 0)
-                                                {
-                                                    policyStatus = "[green]✔ All checks passed[/]";
+                                                    // All checks
+                                                    if (hasMinReviewers)
+                                                        policyChecks.Add("[green]✔ Has 1 or more reviewer required[/]");
+                                                    else
+                                                        policyChecks.Add("[red]✗ Minimum number of reviewers is less than 1[/]");
+
+                                                    if (prohibitsLastPusher)
+                                                        policyChecks.Add("[green]✔ Prohibits last pusher to approve changes[/]");
+                                                    else
+                                                        policyChecks.Add("[red]✗ Prohibit most recent pusher (blockLastPusherVote) must be true[/]");
+
+                                                    if (requireVoteOnLastIteration || requireVoteOnEachIteration || resetRejectionsOnSourcePush)
+                                                        policyChecks.Add("[green]✔ Votes reset on changes[/]");
+                                                    else
+                                                        policyChecks.Add("[red]✗ At least one of requireVoteOnLastIteration, requireVoteOnEachIteration, or resetRejectionsOnSourcePush must be true[/]");
                                                 }
                                                 else
                                                 {
-                                                    policyStatus = string.Join("\n", policyIssues);
+                                                    policyChecks.Add("[red]✗ No branch policy (policy not enabled or missing required reviewers policy)[/]");
                                                 }
                                             }
                                             else
                                             {
-                                                policyStatus = "[red]✗ No branch policy[/]";
+                                                policyChecks.Add("[red]✗ No branch policy[/]");
                                             }
                                         }
                                         catch (Exception ex)
@@ -446,7 +459,11 @@ namespace AzdoScanner.Cli
                                         }
                                     }
                                 }
-                                repos.Add(new RepoInfo(repoName ?? "", repoId ?? "", policyStatus));
+                                else
+                                {
+                                    policyChecks.Add("[red]✗ No branch policy[/]");
+                                }
+                                repos.Add(new RepoInfo(repoName ?? "", repoId ?? "", string.Join("\n", policyChecks)));
                             }
                         }
                     }
