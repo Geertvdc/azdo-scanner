@@ -29,7 +29,7 @@ namespace AzdoScanner.Cli
         public bool IncludeRepos { get; set; }
     }
 
-public class ListProjectsCommand : AsyncCommand<ListProjectsCommandSettings>
+    public class ListProjectsCommand : AsyncCommand<ListProjectsCommandSettings>
     {
         private readonly IProcessRunner _processRunner;
 
@@ -41,7 +41,8 @@ public class ListProjectsCommand : AsyncCommand<ListProjectsCommandSettings>
         public override async Task<int> ExecuteAsync(CommandContext context, ListProjectsCommandSettings settings)
         {
             using var cts = new System.Threading.CancellationTokenSource();
-            Console.CancelKeyPress += (s, e) => {
+            Console.CancelKeyPress += (s, e) =>
+            {
                 e.Cancel = true;
                 cts.Cancel();
                 AnsiConsole.MarkupLine("[yellow]Cancellation requested. Exiting...[/]");
@@ -116,7 +117,7 @@ public class ListProjectsCommand : AsyncCommand<ListProjectsCommandSettings>
             catch (Exception ex)
             {
                 AnsiConsole.MarkupLine($"[red]Failed to parse project list: {ex.Message}[/]");
-                return 1
+                return 1;
             }
 
             // 3. Filter projects if needed
@@ -311,7 +312,8 @@ public class ListProjectsCommand : AsyncCommand<ListProjectsCommandSettings>
                                     repoId = idProp.GetString();
                                 // Check branch policy for main branch
                                 string branch = "main";
-                                string policyStatus = "[red]✗[/]";
+                                string policyStatus = "[red]✗ No branch policy[/]";
+                                List<string> policyIssues = new();
                                 if (!string.IsNullOrEmpty(repoId))
                                 {
                                     var policyResult = _processRunner.Run(
@@ -324,7 +326,118 @@ public class ListProjectsCommand : AsyncCommand<ListProjectsCommandSettings>
                                             var policyJson = System.Text.Json.JsonDocument.Parse(policyResult.Output);
                                             if (policyJson.RootElement.ValueKind == System.Text.Json.JsonValueKind.Array && policyJson.RootElement.GetArrayLength() > 0)
                                             {
-                                                policyStatus = "[green]✔[/]";
+                                                bool foundRequiredReviewers = false;
+                                                foreach (var policy in policyJson.RootElement.EnumerateArray())
+                                                {
+                                                    if (policy.TryGetProperty("type", out var typeProp) &&
+                                                        ((typeProp.ValueKind == System.Text.Json.JsonValueKind.String && typeProp.GetString() == "Minimum number of reviewers") ||
+                                                         (typeProp.ValueKind == System.Text.Json.JsonValueKind.Object && typeProp.TryGetProperty("displayName", out var displayNameProp) && displayNameProp.GetString() == "Minimum number of reviewers")))
+                                                    {
+                                                        foundRequiredReviewers = true;
+                                                        // All relevant settings are under the "settings" property
+                                                        if (policy.TryGetProperty("settings", out var settingsProp))
+                                                        {
+                                                            // minimumApproverCount must be 1 or more
+                                                            if (settingsProp.TryGetProperty("minimumApproverCount", out var minApproverCountValue))
+                                                            {
+                                                                if (minApproverCountValue.ValueKind == System.Text.Json.JsonValueKind.Number && minApproverCountValue.GetInt32() < 1)
+                                                                {
+                                                                    policyIssues.Add("[red]✗ Minimum number of reviewers is less than 1[/]");
+                                                                }
+                                                            }
+                                                            else
+                                                            {
+                                                                policyIssues.Add("[red]✗ Minimum number of reviewers setting missing[/]");
+                                                            }
+
+                                                            // blockLastPusherVote must be false
+                                                            if (settingsProp.TryGetProperty("blockLastPusherVote", out var blockLastPusherVoteValue))
+                                                            {
+                                                                bool blockLastPusherVoteEnabled = false;
+                                                                if (blockLastPusherVoteValue.ValueKind == System.Text.Json.JsonValueKind.True)
+                                                                    blockLastPusherVoteEnabled = true;
+                                                                else if (blockLastPusherVoteValue.ValueKind == System.Text.Json.JsonValueKind.String &&
+                                                                         string.Equals(blockLastPusherVoteValue.GetString(), "true", System.StringComparison.OrdinalIgnoreCase))
+                                                                    blockLastPusherVoteEnabled = true;
+                                                                if (!blockLastPusherVoteEnabled)
+                                                                {
+                                                                    policyIssues.Add("[red]✗ Prohibit most recent pusher (blockLastPusherVote) must be true[/]");
+                                                                }
+                                                            }
+                                                            else
+                                                            {
+                                                                policyIssues.Add("[red]✗ Prohibit most recent pusher (blockLastPusherVote) setting missing[/]");
+                                                            }
+
+                                                            // At least one of requireVoteOnLastIteration, requireVoteOnEachIteration, resetRejectionsOnSourcePush must be true
+                                                            bool requireVoteOnLastIteration = false;
+                                                            bool requireVoteOnEachIteration = false;
+                                                            bool resetRejectionsOnSourcePush = false;
+
+                                                            if (settingsProp.TryGetProperty("requireVoteOnLastIteration", out var requireVoteOnLastIterationValue))
+                                                            {
+                                                                if ((requireVoteOnLastIterationValue.ValueKind == System.Text.Json.JsonValueKind.True) ||
+                                                                    (requireVoteOnLastIterationValue.ValueKind == System.Text.Json.JsonValueKind.String &&
+                                                                     string.Equals(requireVoteOnLastIterationValue.GetString(), "true", System.StringComparison.OrdinalIgnoreCase)))
+                                                                {
+                                                                    requireVoteOnLastIteration = true;
+                                                                }
+                                                            }
+                                                            if (settingsProp.TryGetProperty("requireVoteOnEachIteration", out var requireVoteOnEachIterationValue))
+                                                            {
+                                                                if ((requireVoteOnEachIterationValue.ValueKind == System.Text.Json.JsonValueKind.True) ||
+                                                                    (requireVoteOnEachIterationValue.ValueKind == System.Text.Json.JsonValueKind.String &&
+                                                                     string.Equals(requireVoteOnEachIterationValue.GetString(), "true", System.StringComparison.OrdinalIgnoreCase)))
+                                                                {
+                                                                    requireVoteOnEachIteration = true;
+                                                                }
+                                                            }
+                                                            if (settingsProp.TryGetProperty("resetRejectionsOnSourcePush", out var resetRejectionsOnSourcePushValue))
+                                                            {
+                                                                if ((resetRejectionsOnSourcePushValue.ValueKind == System.Text.Json.JsonValueKind.True) ||
+                                                                    (resetRejectionsOnSourcePushValue.ValueKind == System.Text.Json.JsonValueKind.String &&
+                                                                     string.Equals(resetRejectionsOnSourcePushValue.GetString(), "true", System.StringComparison.OrdinalIgnoreCase)))
+                                                                {
+                                                                    resetRejectionsOnSourcePush = true;
+                                                                }
+                                                            }
+                                                            if (!(requireVoteOnLastIteration || requireVoteOnEachIteration || resetRejectionsOnSourcePush))
+                                                            {
+                                                                policyIssues.Add("[red]✗ At least one of requireVoteOnLastIteration, requireVoteOnEachIteration, or resetRejectionsOnSourcePush must be true[/]");
+                                                            }
+                                                        }
+                                                        else
+                                                        {
+                                                            policyIssues.Add("[red]✗ Policy settings missing[/]");
+                                                        }
+
+                                                        if (policy.TryGetProperty("isEnabled", out var isEnabledProp))
+                                                        {
+                                                            if (!isEnabledProp.GetBoolean())
+                                                                policyIssues.Add("[red]✗ Policy is not enabled[/]");
+                                                        }
+                                                        else
+                                                        {
+                                                            policyIssues.Add("[red]✗ Policy enabled setting missing[/]");
+                                                        }
+                                                    }
+                                                }
+                                                if (!foundRequiredReviewers)
+                                                {
+                                                    policyIssues.Add("[red]✗ No 'Minimum number of reviewers' policy found[/]");
+                                                }
+                                                if (policyIssues.Count == 0)
+                                                {
+                                                    policyStatus = "[green]✔ All checks passed[/]";
+                                                }
+                                                else
+                                                {
+                                                    policyStatus = string.Join("\n", policyIssues);
+                                                }
+                                            }
+                                            else
+                                            {
+                                                policyStatus = "[red]✗ No branch policy[/]";
                                             }
                                         }
                                         catch (Exception ex)
