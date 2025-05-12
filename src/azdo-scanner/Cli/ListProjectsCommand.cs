@@ -39,7 +39,10 @@ namespace AzdoScanner.Cli
         }
 
         public override async Task<int> ExecuteAsync(CommandContext context, ListProjectsCommandSettings settings)
-        {
+        {    
+            AnsiConsole.Write(new FigletText("ZURE").Color(Color.White));
+            AnsiConsole.Write(new FigletText("AzDo Assessor").Color(Color.Grey));
+
             using var cts = new System.Threading.CancellationTokenSource();
             Console.CancelKeyPress += (s, e) =>
             {
