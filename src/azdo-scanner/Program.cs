@@ -16,6 +16,7 @@ var host = Host.CreateDefaultBuilder(args)
     {
         // Removed Greeter and HelloCommand registration
         services.AddTransient<ListProjectsCommand>();
+        services.AddTransient<ListExtensionsCommand>();
         services.AddSingleton<IPrerequisiteChecker, PrerequisiteChecker>();
         services.AddSingleton<IProcessRunner, ProcessRunner>();
     })
@@ -30,9 +31,11 @@ if (!prereqChecker.CheckAll())
 }
 var app = new CommandApp(new AzdoScanner.TypeRegistrar(host.Services));
 
+
 app.Configure(config =>
 {
     config.AddCommand<ListProjectsCommand>("list-projects").WithDescription("Lists all Azure DevOps projects in the organization");
+    config.AddCommand<ListExtensionsCommand>("list-extensions").WithDescription("Lists all installed Azure DevOps extensions in the organization");
 });
 
 return app.Run(args);
