@@ -50,46 +50,12 @@ namespace AzdoScanner.Cli
                 cts.Cancel();
                 AnsiConsole.MarkupLine("[yellow]Cancellation requested. Exiting...[/]");
             };
-            // ... rest of method ...
             // 1. Resolve organization
-            string? usedOrg = settings.Organization;
-            if (string.IsNullOrWhiteSpace(usedOrg))
-            {
-                var orgResult = _processRunner.Run("az", "devops configure --list --output json");
-                if (orgResult.ExitCode == 0)
-                {
-                    try
-                    {
-                        var orgJson = System.Text.Json.JsonDocument.Parse(orgResult.Output);
-                        if (orgJson.RootElement.TryGetProperty("organization", out var orgProp))
-                        {
-                            usedOrg = orgProp.GetString() ?? "";
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        AnsiConsole.MarkupLine($"[yellow]Warning: Failed to parse organization from az config: {ex.Message}[/]");
-                    }
-                }
-            }
+            string? usedOrg = OrganizationResolver.Resolve(settings.Organization, _processRunner);
             if (string.IsNullOrWhiteSpace(usedOrg))
             {
                 AnsiConsole.MarkupLine("[red]No organization specified or found in az config.[/]");
                 return 1;
-            }
-
-
-            // Normalize org URL if needed
-            if (!usedOrg.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
-            {
-                if (!usedOrg.Contains("dev.azure.com", StringComparison.OrdinalIgnoreCase))
-                {
-                    usedOrg = $"https://dev.azure.com/{usedOrg.Trim().Trim('/')}";
-                }
-                else
-                {
-                    usedOrg = $"https://{usedOrg.Trim().Trim('/')}";
-                }
             }
 
             // 2. List projects (async)
