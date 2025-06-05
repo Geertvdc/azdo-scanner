@@ -6,6 +6,11 @@
     <RootNamespace>azdo_scanner</RootNamespace>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <PackAsTool>true</PackAsTool>
+    <ToolCommandName>azdo-scanner</ToolCommandName>
+    <PackageId>azdo-scanner</PackageId>
+    <Version>0.1.0</Version>
+    <Authors>azdo-scanner</Authors>
   </PropertyGroup>
 
   <ItemGroup>

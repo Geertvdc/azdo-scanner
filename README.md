@@ -19,6 +19,7 @@ To use this tool, you need:
 
 - [Azure CLI](https://docs.microsoft.com/en-us/cli/azure/install-azure-cli) installed and configured
 - [Azure DevOps CLI extension](https://docs.microsoft.com/en-us/azure/devops/cli/) installed
+- [.NET SDK 9](https://dotnet.microsoft.com/download/dotnet/9.0) installed (see below)
 - Authentication to your Azure DevOps organization (via `az login` and `az devops configure`)
 
 ## Installation
@@ -28,7 +29,28 @@ Clone this repository and build the project:
 ```bash
 git clone https://github.com/Geertvdc/azdo-scanner.git
 cd azdo-scanner
+# Install the .NET 9 SDK if you don't already have it
+curl -sSL https://dot.net/v1/dotnet-install.sh -o dotnet-install.sh
+bash dotnet-install.sh --channel 9.0 --install-dir $HOME/.dotnet --no-path
+export PATH="$HOME/.dotnet:$PATH"
 dotnet build
+```
+
+### Running Tests
+
+Execute the unit tests with:
+
+```bash
+dotnet test
+```
+
+### Building the Global Tool
+
+Create a NuGet package that can be installed as a .NET tool:
+
+```bash
+dotnet pack -c Release
+dotnet tool install --global --add-source ./src/azdo-scanner/bin/Release azdo-scanner
 ```
 
 ## Usage
