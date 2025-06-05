@@ -36,7 +36,7 @@ dotnet build
 Navigate to the build output directory and run the tool:
 
 ```bash
-cd src/azdo-scanner/bin/Debug/net6.0
+cd src/azdo-scanner/bin/Debug/net9.0
 ./azdo-scanner [command] [options]
 ```
 
