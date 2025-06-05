@@ -399,3 +399,5 @@ FodyWeavers.xsd
 
 # JetBrains Rider
 *.sln.iml
+dotnet-install.sh
+packages-microsoft-prod.deb
