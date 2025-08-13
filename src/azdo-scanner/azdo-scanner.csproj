@@ -7,10 +7,19 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <PackAsTool>true</PackAsTool>
-    <ToolCommandName>azdo-scanner</ToolCommandName>
-    <PackageId>azdo-scanner</PackageId>
-    <Version>0.1.0</Version>
-    <Authors>azdo-scanner</Authors>
+    <ToolCommandName>zure-azdo-scanner</ToolCommandName>
+    <PackageId>zure-azdo-scanner</PackageId>
+    <Version>0.2.0</Version>
+    <Authors>Zure</Authors>
+    <Description>CLI tool for scanning Azure DevOps organizations for governance and security insights (projects, admins, repos, branch protections, service connections, extensions).</Description>
+    <RepositoryUrl>https://github.com/Geertvdc/azdo-scanner</RepositoryUrl>
+    <PackageProjectUrl>https://github.com/Geertvdc/azdo-scanner</PackageProjectUrl>
+    <PackageReadmeFile>README.NuGet.md</PackageReadmeFile>
+    <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageTags>azure-devops;security;governance;cli;scanner</PackageTags>
+    <IncludeSymbols>false</IncludeSymbols>
   </PropertyGroup>
 
   <ItemGroup>
@@ -20,6 +29,8 @@
     <PackageReference Include="Microsoft.Extensions.Hosting" Version="9.0.4" />
     <PackageReference Include="Spectre.Console" Version="0.50.0" />
     <PackageReference Include="Spectre.Console.Cli" Version="0.50.0" />
+    <None Include="README.NuGet.md" Pack="true" PackagePath="/" />
+    <None Include="NOTICE" Pack="true" PackagePath="/" />
   </ItemGroup>
 
 </Project>

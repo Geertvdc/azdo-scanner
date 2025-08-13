@@ -1,0 +1,21 @@
+zure-azdo-scanner
+Copyright (c) 2025 Zure
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this product except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+
+Attribution Requirement: If you fork, extend, or redistribute this tool (in
+source or binary form), you must retain this NOTICE file and the original
+copyright statement, and provide a reference (link) to the original
+repository: https://github.com/Geertvdc/azdo-scanner
+
+Third-party dependencies are licensed under their respective licenses.
