@@ -9,7 +9,7 @@
     <PackAsTool>true</PackAsTool>
     <ToolCommandName>zure-azdo-scanner</ToolCommandName>
     <PackageId>zure-azdo-scanner</PackageId>
-    <Version>0.2.0</Version>
+    <Version>0.2.*</Version>
     <Authors>Zure</Authors>
     <Description>CLI tool for scanning Azure DevOps organizations for governance and security insights (projects, admins, repos, branch protections, service connections, extensions).</Description>
     <RepositoryUrl>https://github.com/Geertvdc/azdo-scanner</RepositoryUrl>
