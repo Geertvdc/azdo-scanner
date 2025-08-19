@@ -68,7 +68,6 @@ jobs:
           echo "package_version=$new_version" >> "$GITHUB_OUTPUT"
 
       - name: Create Tag
-        if: steps.version.outcomes == 'success'
         run: |
           VERSION=${{ steps.version.outputs.package_version }}
           git tag "v$VERSION"
@@ -76,13 +75,11 @@ jobs:
           echo "Created and pushed tag: v$VERSION"
 
       - name: Pack
-        if: steps.version.outcomes == 'success'
         run: |
           VERSION=${{ steps.version.outputs.package_version }}
           dotnet pack src/azdo-scanner/azdo-scanner.csproj -c Release -o out /p:Version=$VERSION /p:ContinuousIntegrationBuild=true
 
       - name: Publish to NuGet
-        if: steps.version.outcomes == 'success'
         env:
           NUGET_API_KEY: ${{ secrets.NUGET_KEY }}
         run: |
@@ -96,7 +93,6 @@ jobs:
           dotnet nuget push "$PACKAGE_FILE" --api-key "$NUGET_API_KEY" --source https://api.nuget.org/v3/index.json --skip-duplicate
 
       - name: Summary
-        if: steps.version.outcomes == 'success'
         run: |
           echo "Published version: ${{ steps.version.outputs.package_version }}" >> $GITHUB_STEP_SUMMARY
 
