@@ -10,6 +10,9 @@ concurrency:
   group: publish-nuget
   cancel-in-progress: false
 
+permissions:
+  contents: write  # Required to create and push tags
+
 jobs:
   build:
     runs-on: ubuntu-latest
