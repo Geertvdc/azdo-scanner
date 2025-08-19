@@ -39,13 +39,13 @@ jobs:
         run: |
           set -euo pipefail
           
-          # Get the base version from csproj (should contain something like 0.2.* or 0.2.0)
+          # Get the base version from csproj
           CSPROJ=src/azdo-scanner/azdo-scanner.csproj
           base_version=$(grep -oPm1 '(?<=<Version>)[^<]+' "$CSPROJ")
           echo "Base version in csproj: $base_version"
           
-          # Extract major.minor from base version (remove .* or .0 suffix)
-          major_minor=$(echo "$base_version" | sed 's/\.[0-9*]*$//')
+          # Extract major.minor from base version
+          major_minor=$(echo "$base_version" | cut -d. -f1-2)
           echo "Major.minor: $major_minor"
           
           # Find the latest tag with this major.minor prefix
