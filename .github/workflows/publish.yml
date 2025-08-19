@@ -1,0 +1,114 @@
+name: Build & Publish NuGet Tool
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+concurrency:
+  group: publish-nuget
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+
+      - name: Restore
+        run: dotnet restore
+
+      - name: Build
+        run: dotnet build --configuration Release --no-restore
+
+      - name: Test
+        run: dotnet test --configuration Release --no-build --verbosity minimal
+
+      - name: Determine Next Version
+        id: version
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          set -euo pipefail
+          
+          # Get the base version from csproj (should contain something like 0.2.* or 0.2.0)
+          CSPROJ=src/azdo-scanner/azdo-scanner.csproj
+          base_version=$(grep -oPm1 '(?<=<Version>)[^<]+' "$CSPROJ")
+          echo "Base version in csproj: $base_version"
+          
+          # Extract major.minor from base version (remove .* or .0 suffix)
+          major_minor=$(echo "$base_version" | sed 's/\.[0-9*]*$//')
+          echo "Major.minor: $major_minor"
+          
+          # Find the latest tag with this major.minor prefix
+          latest_tag=$(git tag -l "v${major_minor}.*" --sort=-version:refname | head -n1 || echo "")
+          
+          if [ -z "$latest_tag" ]; then
+            # No existing tags, start with .0
+            new_version="${major_minor}.0"
+            echo "No existing tags found, using: $new_version"
+          else
+            # Extract patch number and increment
+            latest_version=${latest_tag#v}
+            echo "Latest tag: $latest_tag (version: $latest_version)"
+            patch=$(echo "$latest_version" | cut -d. -f3)
+            new_patch=$((patch + 1))
+            new_version="${major_minor}.${new_patch}"
+            echo "Incrementing patch from $patch to $new_patch: $new_version"
+          fi
+          
+          echo "package_version=$new_version" >> "$GITHUB_OUTPUT"
+
+      - name: Create Tag
+        if: steps.version.outcomes == 'success'
+        run: |
+          VERSION=${{ steps.version.outputs.package_version }}
+          git tag "v$VERSION"
+          git push origin "v$VERSION"
+          echo "Created and pushed tag: v$VERSION"
+
+      - name: Pack
+        if: steps.version.outcomes == 'success'
+        run: |
+          VERSION=${{ steps.version.outputs.package_version }}
+          dotnet pack src/azdo-scanner/azdo-scanner.csproj -c Release -o out /p:Version=$VERSION /p:ContinuousIntegrationBuild=true
+
+      - name: Publish to NuGet
+        if: steps.version.outcomes == 'success'
+        env:
+          NUGET_API_KEY: ${{ secrets.NUGET_KEY }}
+        run: |
+          set -euo pipefail
+          VERSION=${{ steps.version.outputs.package_version }}
+          PACKAGE_FILE="out/zure-azdo-scanner.${VERSION}.nupkg"
+          if [ ! -f "$PACKAGE_FILE" ]; then
+            echo "Package $PACKAGE_FILE not found" >&2
+            exit 1
+          fi
+          dotnet nuget push "$PACKAGE_FILE" --api-key "$NUGET_API_KEY" --source https://api.nuget.org/v3/index.json --skip-duplicate
+
+      - name: Summary
+        if: steps.version.outcomes == 'success'
+        run: |
+          echo "Published version: ${{ steps.version.outputs.package_version }}" >> $GITHUB_STEP_SUMMARY
+
+  # Build on PRs (no publish). Separate job not strictly necessary but keeps intent clear.
+  pr-build:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+      - run: dotnet restore
+      - run: dotnet build --configuration Release --no-restore
+      - run: dotnet test --configuration Release --no-build --verbosity minimal
