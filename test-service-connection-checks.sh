@@ -69,6 +69,7 @@ SERVICE_CONNECTIONS=$(az devops service-endpoint list --project "$PROJECT" --out
 
 if [ "$SERVICE_CONNECTIONS" = "[]" ]; then
     echo "⚠️  No service connections found or access denied"
+    exit 1
 else
     echo "✅ Service connections retrieved successfully"
     echo "Service connections found:"
@@ -79,357 +80,113 @@ else
         echo "✅ Test service connection '$TEST_CONN_NAME' found"
     else
         echo "⚠️  Test service connection '$TEST_CONN_NAME' not found in results"
+        echo "Available service connections:"
+        echo "$SERVICE_CONNECTIONS" | jq -r '.[] | "  - \(.name) (\(.id))"'
+        exit 1
     fi
 fi
 echo ""
 
-# Test 2: Try Method 1 - Pipeline Checks API
-echo "=== Test 2: Pipeline Checks API Method ==="
+# Test 2: Check for existing approvals and checks using correct API
+echo "=== Test 2: Check Service Connection Approvals and Checks ==="
 
-# Try multiple API versions and approaches
-echo "🔄 Trying different API approaches..."
+# First, let's try to get the service connection details
+echo "🔄 Getting service connection details..."
+echo "Command: az devops service-endpoint show --id $TEST_CONN_ID"
 
-# Approach 2.1: Try with different API versions and query formats
+SERVICE_ENDPOINT_DETAILS=$(az devops service-endpoint show --id "$TEST_CONN_ID" --output json 2>/dev/null || echo '{}')
+echo "Service endpoint details retrieved: $(echo "$SERVICE_ENDPOINT_DETAILS" | jq -c '. | {name: .name, type: .type, isReady: .isReady}' 2>/dev/null || echo "Failed to parse")"
+
+# Check for pipeline checks using correct API endpoint and parameters
 echo ""
-echo "📋 Approach 2.1: Pipeline Checks API (v7.1-preview.1)"
-echo "Command: az devops invoke --area pipelines --resource checks ..."
+echo "🔄 Checking for pipeline checks on service connection..."
 
-CHECKS_RESULT_V71=$(az devops invoke \
+# Method 1: Pipeline checks with resource query
+echo "📋 Method 2.1: Pipeline Checks API (correct resource query)"
+echo "Command: az devops invoke --area pipelines --resource checks/queryresource --http-method POST"
+
+# Create payload for resource query
+RESOURCE_QUERY_PAYLOAD=$(cat << EOF
+{
+  "resourceType": "endpoint",
+  "resourceId": "$TEST_CONN_ID"
+}
+EOF
+)
+
+TEMP_RESOURCE_PAYLOAD=$(mktemp)
+echo "$RESOURCE_QUERY_PAYLOAD" > "$TEMP_RESOURCE_PAYLOAD"
+
+PIPELINE_CHECKS_RESULT=$(az devops invoke \
     --area "pipelines" \
-    --resource "checks" \
+    --resource "checks/queryresource" \
     --route-parameters project="$PROJECT" \
-    --http-method GET \
+    --http-method POST \
+    --in-file "$TEMP_RESOURCE_PAYLOAD" \
     --api-version "7.1-preview.1" \
-    --query-parameters "resourceType=endpoint&resourceId=$TEST_CONN_ID" \
     2>/dev/null || echo '{"value": []}')
 
-echo "Response: $(echo "$CHECKS_RESULT_V71" | jq -c '.' 2>/dev/null || echo "Invalid JSON")"
+rm -f "$TEMP_RESOURCE_PAYLOAD"
+echo "Response: $(echo "$PIPELINE_CHECKS_RESULT" | jq -c '.' 2>/dev/null || echo "Invalid JSON")"
 
-# Approach 2.2: Try with configurations endpoint
+# Method 2: Try getting all checks and filter
 echo ""
-echo "📋 Approach 2.2: Check Configurations API"
-echo "Command: az devops invoke --area pipelines --resource checks/configurations ..."
+echo "📋 Method 2.2: Get All Pipeline Checks"
+echo "Command: az devops invoke --area pipelines --resource checks/configurations"
 
-CHECKS_CONFIG_RESULT=$(az devops invoke \
+ALL_CHECKS_RESULT=$(az devops invoke \
     --area "pipelines" \
     --resource "checks/configurations" \
     --route-parameters project="$PROJECT" \
     --http-method GET \
     --api-version "7.1-preview.1" \
-    --query-parameters "resourceType=endpoint&resourceId=$TEST_CONN_ID" \
     2>/dev/null || echo '{"value": []}')
 
-echo "Response: $(echo "$CHECKS_CONFIG_RESULT" | jq -c '.' 2>/dev/null || echo "Invalid JSON")"
+echo "Response: $(echo "$ALL_CHECKS_RESULT" | jq -c '.' 2>/dev/null || echo "Invalid JSON")"
 
-# Approach 2.3: Try without route parameters
-echo ""
-echo "📋 Approach 2.3: Direct API call"
-echo "Command: az devops invoke --area pipelines --resource checks ..."
-
-CHECKS_DIRECT_RESULT=$(az devops invoke \
-    --area "pipelines" \
-    --resource "checks" \
-    --http-method GET \
-    --api-version "7.1-preview.1" \
-    --query-parameters "project=$PROJECT&resourceType=endpoint&resourceId=$TEST_CONN_ID" \
-    2>/dev/null || echo '{"value": []}')
-
-echo "Response: $(echo "$CHECKS_DIRECT_RESULT" | jq -c '.' 2>/dev/null || echo "Invalid JSON")"
-
-# Evaluate all results
-echo ""
-echo "📊 Evaluating results..."
-
-# Check each result for valid data
-BEST_RESULT=""
-if [ "$(echo "$CHECKS_RESULT_V71" | jq -r '.value | length // 0' 2>/dev/null || echo 0)" -gt 0 ]; then
-    echo "✅ Found data in Approach 2.1 (v7.1-preview.1)"
-    BEST_RESULT="$CHECKS_RESULT_V71"
-elif [ "$(echo "$CHECKS_CONFIG_RESULT" | jq -r '.value | length // 0' 2>/dev/null || echo 0)" -gt 0 ]; then
-    echo "✅ Found data in Approach 2.2 (configurations endpoint)"
-    BEST_RESULT="$CHECKS_CONFIG_RESULT"
-elif [ "$(echo "$CHECKS_DIRECT_RESULT" | jq -r '.value | length // 0' 2>/dev/null || echo 0)" -gt 0 ]; then
-    echo "✅ Found data in Approach 2.3 (direct call)"
-    BEST_RESULT="$CHECKS_DIRECT_RESULT"
-else
-    echo "⚠️  No checks found in any approach"
-fi
-
-if [ -n "$BEST_RESULT" ] && [ "$BEST_RESULT" != '{"value": []}' ]; then
-    echo ""
-    echo "✅ Pipeline checks retrieved successfully"
-    echo "Checks found:"
-    echo "$BEST_RESULT" | jq -r '.value[]? | "  - \(.settings.displayName // .displayName // "Unknown") (Type: \(.type.name // .type // "Unknown"))"' 2>/dev/null || echo "  - Could not parse check details"
-    
-    # Look for branch control
-    BRANCH_CONTROLS=$(echo "$BEST_RESULT" | jq '.value[]? | select(.settings.displayName == "Branch control" or .displayName == "Branch control")' 2>/dev/null || echo "")
-    if [ -n "$BRANCH_CONTROLS" ] && [ "$BRANCH_CONTROLS" != "null" ] && [ "$BRANCH_CONTROLS" != "" ]; then
-        echo "✅ Branch control found!"
-        echo "$BRANCH_CONTROLS" | jq -r '"  Allowed branches: " + (.settings.inputs.allowedBranches // .inputs.allowedBranches // "Not set")' 2>/dev/null || echo "  Could not parse allowed branches"
-        echo "$BRANCH_CONTROLS" | jq -r '"  Ensure protection: " + (.settings.inputs.ensureProtectionOfBranch // .inputs.ensureProtectionOfBranch // "Not set")' 2>/dev/null || echo "  Could not parse protection setting"
-        echo "$BRANCH_CONTROLS" | jq -r '"  Allow unknown status: " + (.settings.inputs.allowUnknownStatusBranch // .inputs.allowUnknownStatusBranch // "Not set")' 2>/dev/null || echo "  Could not parse unknown status setting"
+# Filter for our specific resource
+if [ "$(echo "$ALL_CHECKS_RESULT" | jq -r '.value | length // 0' 2>/dev/null || echo 0)" -gt 0 ]; then
+    echo "Filtering for resource ID: $TEST_CONN_ID"
+    FILTERED_CHECKS=$(echo "$ALL_CHECKS_RESULT" | jq --arg resource_id "$TEST_CONN_ID" '.value[] | select(.resource.id == $resource_id)' 2>/dev/null || echo "")
+    if [ -n "$FILTERED_CHECKS" ] && [ "$FILTERED_CHECKS" != "null" ]; then
+        echo "✅ Found checks for our service connection:"
+        echo "$FILTERED_CHECKS" | jq '.'
     else
-        echo "⚠️  No branch control configured"
+        echo "⚠️  No checks found for service connection $TEST_CONN_ID"
     fi
-else
-    echo "⚠️  No checks found or access denied"
-fi
-echo ""
-
-# Test 3: Try Method 2 - Contribution HierarchyQuery API
-echo "=== Test 3: Contribution HierarchyQuery API Method ==="
-
-# Try multiple contribution API approaches
-echo "🔄 Trying different contribution API approaches..."
-
-# Approach 3.1: Original documented approach
-echo ""
-echo "📋 Approach 3.1: Original contribution approach"
-
-QUERY_PAYLOAD_V1=$(cat << EOF
-{
-  "contributionIds": ["ms.vss-pipelinechecks.checks-data-provider"],
-  "dataProviderContext": {
-    "properties": {
-      "resourceId": "$TEST_CONN_ID",
-      "sourcePage": {
-        "url": "$ORG/$PROJECT/_settings/adminservices?resourceId=$TEST_CONN_ID",
-        "routeId": "ms.vss-admin-web.project-admin-hub-route",
-        "routeValues": {
-          "project": "$PROJECT",
-          "adminPivot": "adminservices",
-          "controller": "ContributedPage",
-          "action": "Execute"
-        }
-      }
-    }
-  }
-}
-EOF
-)
-
-TEMP_PAYLOAD_V1=$(mktemp)
-echo "$QUERY_PAYLOAD_V1" > "$TEMP_PAYLOAD_V1"
-
-HIERARCHY_RESULT_V1=$(az devops invoke \
-    --area "Contribution" \
-    --resource "HierarchyQuery" \
-    --http-method POST \
-    --in-file "$TEMP_PAYLOAD_V1" \
-    --api-version "7.1-preview.1" \
-    2>/dev/null || echo '{}')
-
-rm -f "$TEMP_PAYLOAD_V1"
-echo "Response: $(echo "$HIERARCHY_RESULT_V1" | jq -c '.' 2>/dev/null || echo "Invalid JSON")"
-
-# Approach 3.2: Alternative contribution ID
-echo ""
-echo "📋 Approach 3.2: Alternative contribution ID"
-
-QUERY_PAYLOAD_V2=$(cat << EOF
-{
-  "contributionIds": ["ms.vss-pipelinechecks-web.checks-hub-data-provider"],
-  "dataProviderContext": {
-    "properties": {
-      "resourceId": "$TEST_CONN_ID",
-      "resourceType": "endpoint"
-    }
-  }
-}
-EOF
-)
-
-TEMP_PAYLOAD_V2=$(mktemp)
-echo "$QUERY_PAYLOAD_V2" > "$TEMP_PAYLOAD_V2"
-
-HIERARCHY_RESULT_V2=$(az devops invoke \
-    --area "Contribution" \
-    --resource "HierarchyQuery" \
-    --http-method POST \
-    --in-file "$TEMP_PAYLOAD_V2" \
-    --api-version "7.1-preview.1" \
-    2>/dev/null || echo '{}')
-
-rm -f "$TEMP_PAYLOAD_V2"
-echo "Response: $(echo "$HIERARCHY_RESULT_V2" | jq -c '.' 2>/dev/null || echo "Invalid JSON")"
-
-# Approach 3.3: Simplified data provider context
-echo ""
-echo "📋 Approach 3.3: Simplified context"
-
-QUERY_PAYLOAD_V3=$(cat << EOF
-{
-  "contributionIds": ["ms.vss-pipelinechecks.checks-data-provider"],
-  "dataProviderContext": {
-    "properties": {
-      "resourceId": "$TEST_CONN_ID",
-      "resourceType": "endpoint",
-      "project": "$PROJECT"
-    }
-  }
-}
-EOF
-)
-
-TEMP_PAYLOAD_V3=$(mktemp)
-echo "$QUERY_PAYLOAD_V3" > "$TEMP_PAYLOAD_V3"
-
-HIERARCHY_RESULT_V3=$(az devops invoke \
-    --area "Contribution" \
-    --resource "HierarchyQuery" \
-    --http-method POST \
-    --in-file "$TEMP_PAYLOAD_V3" \
-    --api-version "7.1-preview.1" \
-    2>/dev/null || echo '{}')
-
-rm -f "$TEMP_PAYLOAD_V3"
-echo "Response: $(echo "$HIERARCHY_RESULT_V3" | jq -c '.' 2>/dev/null || echo "Invalid JSON")"
-
-# Approach 3.4: Try direct REST API approach using az rest
-echo ""
-echo "📋 Approach 3.4: Direct REST API via az rest"
-
-# Try using az rest command which might handle authentication better
-REST_RESULT=$(az rest \
-    --method GET \
-    --url "https://dev.azure.com/${ORG#https://dev.azure.com/}/$PROJECT/_apis/pipelines/checks/configurations?resourceType=endpoint&resourceId=$TEST_CONN_ID&api-version=7.1-preview.1" \
-    2>/dev/null || echo '{"value": []}')
-
-echo "Response: $(echo "$REST_RESULT" | jq -c '.' 2>/dev/null || echo "Invalid JSON")"
-
-# Evaluate all results
-echo ""
-echo "📊 Evaluating contribution API results..."
-
-BEST_CONTRIB_RESULT=""
-if echo "$HIERARCHY_RESULT_V1" | jq -e '.dataProviders' > /dev/null 2>&1; then
-    echo "✅ Found data in Approach 3.1 (original)"
-    BEST_CONTRIB_RESULT="$HIERARCHY_RESULT_V1"
-elif echo "$HIERARCHY_RESULT_V2" | jq -e '.dataProviders' > /dev/null 2>&1; then
-    echo "✅ Found data in Approach 3.2 (alternative contribution)"
-    BEST_CONTRIB_RESULT="$HIERARCHY_RESULT_V2"
-elif echo "$HIERARCHY_RESULT_V3" | jq -e '.dataProviders' > /dev/null 2>&1; then
-    echo "✅ Found data in Approach 3.3 (simplified)"
-    BEST_CONTRIB_RESULT="$HIERARCHY_RESULT_V3"
-elif [ "$(echo "$REST_RESULT" | jq -r '.value | length // 0' 2>/dev/null || echo 0)" -gt 0 ]; then
-    echo "✅ Found data in Approach 3.4 (REST API)"
-    # Convert REST API result to contribution format for consistent processing
-    BEST_CONTRIB_RESULT="$REST_RESULT"
-else
-    echo "⚠️  No data found in any contribution approach"
 fi
 
-# Process the best result
-if [ -n "$BEST_CONTRIB_RESULT" ] && [ "$BEST_CONTRIB_RESULT" != '{}' ]; then
-    echo ""
-    
-    # Try to extract branch controls from different possible structures
-    BRANCH_CHECKS=""
-    
-    # Try contribution API structure first
-    if echo "$BEST_CONTRIB_RESULT" | jq -e '.dataProviders' > /dev/null 2>&1; then
-        echo "✅ Processing contribution API response"
-        BRANCH_CHECKS=$(echo "$BEST_CONTRIB_RESULT" | jq -r '.dataProviders | to_entries[] | .value.checkConfigurationDataList[]? | select(.checkConfiguration.settings.displayName == "Branch control")' 2>/dev/null || echo "")
-    fi
-    
-    # Try REST API structure if contribution didn't work
-    if [ -z "$BRANCH_CHECKS" ] && echo "$BEST_CONTRIB_RESULT" | jq -e '.value' > /dev/null 2>&1; then
-        echo "✅ Processing REST API response"
-        BRANCH_CHECKS=$(echo "$BEST_CONTRIB_RESULT" | jq -r '.value[]? | select(.settings.displayName == "Branch control" or .displayName == "Branch control")' 2>/dev/null || echo "")
-    fi
-    
-    if [ -n "$BRANCH_CHECKS" ] && [ "$BRANCH_CHECKS" != "null" ] && [ "$BRANCH_CHECKS" != "" ]; then
-        echo "✅ Branch control configuration found!"
-        echo ""
-        echo "Branch Control Details:"
-        
-        # Try different possible field structures
-        ALLOWED_BRANCHES=$(echo "$BRANCH_CHECKS" | jq -r '.checkConfiguration.settings.inputs.allowedBranches // .settings.inputs.allowedBranches // .inputs.allowedBranches // "Not set"' 2>/dev/null || echo "Not set")
-        ENSURE_PROTECTION=$(echo "$BRANCH_CHECKS" | jq -r '.checkConfiguration.settings.inputs.ensureProtectionOfBranch // .settings.inputs.ensureProtectionOfBranch // .inputs.ensureProtectionOfBranch // "Not set"' 2>/dev/null || echo "Not set")
-        ALLOW_UNKNOWN=$(echo "$BRANCH_CHECKS" | jq -r '.checkConfiguration.settings.inputs.allowUnknownStatusBranch // .settings.inputs.allowUnknownStatusBranch // .inputs.allowUnknownStatusBranch // "Not set"' 2>/dev/null || echo "Not set")
-        
-        echo "  Allowed branches: $ALLOWED_BRANCHES"
-        echo "  Ensure protection: $ENSURE_PROTECTION"
-        echo "  Allow unknown status: $ALLOW_UNKNOWN"
-        echo ""
-        
-        # Security assessment
-        echo "Security Assessment:"
-        if [[ "$ENSURE_PROTECTION" == "true" && "$ALLOW_UNKNOWN" == "false" ]] && [[ "$ALLOWED_BRANCHES" =~ ^(main|master)(,.*)?$ ]]; then
-            echo "  🔒 Status: GOOD - Well configured branch protection"
-        elif [[ "$ENSURE_PROTECTION" == "true" ]]; then
-            echo "  ⚠️  Status: MODERATE - Branch protection enabled but with some risks"
-        else
-            echo "  ❌ Status: POOR - Insufficient branch protection"
-        fi
-        
-        # Additional details
-        echo ""
-        echo "Full configuration:"
-        echo "$BRANCH_CHECKS" | jq '.' 2>/dev/null || echo "$BRANCH_CHECKS"
-    else
-        echo "⚠️  No branch control configured for this service connection"
-    fi
-else
-    echo "⚠️  No valid API response received from any approach"
-    echo "This might indicate:"
-    echo "  - No checks are configured on this service connection"
-    echo "  - Insufficient permissions to access check configurations"
-    echo "  - API endpoint or structure has changed"
-    echo "  - Authentication issues"
-fi
-
+# Method 3: Use distributedtask API to get service endpoint with checks
 echo ""
+echo "📋 Method 2.3: Distributed Task Service Endpoint API"
+echo "Command: az devops invoke --area distributedtask --resource serviceendpoints"
 
-# Test 4: Additional API exploration
-echo "=== Test 4: Additional API Methods ==="
-
-echo "🔄 Exploring additional Azure DevOps APIs..."
-
-# Approach 4.1: Try the approvals endpoint
-echo ""
-echo "📋 Approach 4.1: Approvals API"
-APPROVALS_RESULT=$(az devops invoke \
-    --area "pipelines" \
-    --resource "approvals" \
-    --route-parameters project="$PROJECT" \
-    --http-method GET \
-    --api-version "7.1-preview.1" \
-    --query-parameters "resourceType=endpoint&resourceId=$TEST_CONN_ID" \
-    2>/dev/null || echo '{"value": []}')
-
-echo "Response: $(echo "$APPROVALS_RESULT" | jq -c '.' 2>/dev/null || echo "Invalid JSON")"
-
-# Approach 4.2: Try direct resource endpoint
-echo ""
-echo "📋 Approach 4.2: Resource endpoint checks"
-RESOURCE_CHECKS=$(az devops invoke \
+SERVICE_ENDPOINT_FULL=$(az devops invoke \
     --area "distributedtask" \
     --resource "serviceendpoints" \
     --route-parameters project="$PROJECT" endpointId="$TEST_CONN_ID" \
     --http-method GET \
-    --api-version "7.1-preview.1" \
+    --api-version "7.1-preview.4" \
     2>/dev/null || echo '{}')
 
-echo "Response: $(echo "$RESOURCE_CHECKS" | jq -c '.' 2>/dev/null || echo "Invalid JSON")"
+echo "Response: $(echo "$SERVICE_ENDPOINT_FULL" | jq -c '. | {name: .name, type: .type, authorization: .authorization.scheme}' 2>/dev/null || echo "Invalid JSON")"
 
-# Approach 4.3: Try policy configurations
+# Check if it has authorization or other check-related properties
+if echo "$SERVICE_ENDPOINT_FULL" | jq -e '.authorization' > /dev/null 2>&1; then
+    echo "Authorization details found:"
+    echo "$SERVICE_ENDPOINT_FULL" | jq '.authorization'
+fi
+
 echo ""
-echo "📋 Approach 4.3: Policy configurations"
-POLICY_RESULT=$(az devops invoke \
-    --area "policy" \
-    --resource "configurations" \
-    --route-parameters project="$PROJECT" \
-    --http-method GET \
-    --api-version "7.1-preview.1" \
-    2>/dev/null || echo '{"value": []}')
 
-echo "Response: $(echo "$POLICY_RESULT" | jq -c '.' 2>/dev/null || echo "Invalid JSON")"
+# Test 3: Check for environment-based controls
+echo "=== Test 3: Environment and Resource Authorization ==="
 
-# Approach 4.4: Environment checks (if applicable)  
-echo ""
-echo "📋 Approach 4.4: Environment checks"
-ENV_CHECKS=$(az devops invoke \
+# Method 1: Check environments that might use this service connection
+echo "🔄 Checking environments..."
+echo "Command: az devops invoke --area distributedtask --resource environments"
+
+ENVIRONMENTS_RESULT=$(az devops invoke \
     --area "distributedtask" \
     --resource "environments" \
     --route-parameters project="$PROJECT" \
@@ -437,36 +194,114 @@ ENV_CHECKS=$(az devops invoke \
     --api-version "7.1-preview.1" \
     2>/dev/null || echo '{"value": []}')
 
-echo "Response: $(echo "$ENV_CHECKS" | jq -c '.' 2>/dev/null || echo "Invalid JSON")"
+echo "Environments found: $(echo "$ENVIRONMENTS_RESULT" | jq -r '.value | length // 0' 2>/dev/null || echo 0)"
+
+if [ "$(echo "$ENVIRONMENTS_RESULT" | jq -r '.value | length // 0' 2>/dev/null || echo 0)" -gt 0 ]; then
+    echo "Environment details:"
+    echo "$ENVIRONMENTS_RESULT" | jq -r '.value[] | "  - \(.name) (ID: \(.id))"' 2>/dev/null || echo "Could not parse environments"
+    
+    # For each environment, check if it has checks related to our service connection
+    echo "$ENVIRONMENTS_RESULT" | jq -r '.value[].id' 2>/dev/null | while read -r env_id; do
+        if [ -n "$env_id" ]; then
+            echo "Checking environment $env_id for approvals..."
+            ENV_CHECKS=$(az devops invoke \
+                --area "pipelines" \
+                --resource "checks/configurations" \
+                --route-parameters project="$PROJECT" \
+                --query-parameters "resourceType=environment&resourceId=$env_id" \
+                --http-method GET \
+                --api-version "7.1-preview.1" \
+                2>/dev/null || echo '{"value": []}')
+            
+            if [ "$(echo "$ENV_CHECKS" | jq -r '.value | length // 0' 2>/dev/null || echo 0)" -gt 0 ]; then
+                echo "Found checks for environment $env_id:"
+                echo "$ENV_CHECKS" | jq '.value[]'
+            fi
+        fi
+    done
+fi
 
 echo ""
+
+# Test 4: Check build/release definitions that use this service connection
+echo "=== Test 4: Build/Release Definition Analysis ==="
+
+echo "🔄 Checking build definitions that might use this service connection..."
+
+# Get build definitions
+BUILD_DEFINITIONS=$(az devops invoke \
+    --area "build" \
+    --resource "definitions" \
+    --route-parameters project="$PROJECT" \
+    --http-method GET \
+    --api-version "7.1-preview.7" \
+    2>/dev/null || echo '{"value": []}')
+
+echo "Build definitions found: $(echo "$BUILD_DEFINITIONS" | jq -r '.value | length // 0' 2>/dev/null || echo 0)"
+
+if [ "$(echo "$BUILD_DEFINITIONS" | jq -r '.value | length // 0' 2>/dev/null || echo 0)" -gt 0 ]; then
+    # Check each build definition for our service connection
+    echo "Checking build definitions for service connection usage..."
+    echo "$BUILD_DEFINITIONS" | jq -r '.value[] | select(.repository.properties.connectedServiceId // .triggers[]?.branchFilters[]? // false) | .name' 2>/dev/null | head -3 | while read -r build_name; do
+        if [ -n "$build_name" ]; then
+            echo "  - Found potential usage in: $build_name"
+        fi
+    done
+fi
+
+echo ""
+
+# Test 5: Alternative approach - Check project settings and policies
+echo "=== Test 5: Project Settings and Security ==="
+
+echo "🔄 Checking project-level policies..."
+
+# Check project policies
+PROJECT_POLICIES=$(az devops invoke \
+    --area "policy" \
+    --resource "configurations" \
+    --route-parameters project="$PROJECT" \
+    --http-method GET \
+    --api-version "7.1-preview.1" \
+    2>/dev/null || echo '{"value": []}')
+
+echo "Project policies found: $(echo "$PROJECT_POLICIES" | jq -r '.value | length // 0' 2>/dev/null || echo 0)"
+
+if [ "$(echo "$PROJECT_POLICIES" | jq -r '.value | length // 0' 2>/dev/null || echo 0)" -gt 0 ]; then
+    echo "Policy types found:"
+    echo "$PROJECT_POLICIES" | jq -r '.value[] | "  - \(.type.displayName // .type.id) (Enabled: \(.isEnabled))"' 2>/dev/null || echo "Could not parse policies"
+fi
+
+echo ""
+
 echo "=== Test Summary ==="
-echo "This enhanced test script validates multiple approaches for checking branch protection:"
+echo "This comprehensive test script validates multiple approaches for checking branch protection:"
 echo ""
 echo "📋 Methods Tested:"
-echo "  - Test 1: Service connection listing (basic functionality)"
-echo "  - Test 2: Pipeline Checks API (3 different approaches)"
-echo "  - Test 3: Contribution HierarchyQuery API (4 different approaches)"
-echo "  - Test 4: Additional exploration APIs (4 alternative endpoints)"
-echo ""
-echo "📊 Total: 12 different API approaches tested"
+echo "  - Test 1: Service connection listing and validation"
+echo "  - Test 2: Pipeline checks and approvals API (3 different methods)"
+echo "  - Test 3: Environment-based authorization controls"
+echo "  - Test 4: Build/Release definition analysis"
+echo "  - Test 5: Project-level policy configurations"
 echo ""
 echo "✅ If any method showed successful results above, that approach can be used."
 echo ""
-echo "⚠️  If all methods failed, it could be due to:"
-echo "1. Insufficient permissions (Contributor/Project Administrator rights needed)"
-echo "2. No branch protection checks configured on the test service connection"
-echo "3. API version changes or endpoint availability in your Azure DevOps instance"
-echo "4. Network connectivity or authentication issues"
-echo "5. Service connection doesn't support checks (older connection types)"
+echo "🔍 **Key Findings:**"
+echo "1. If no checks were found, the service connection might not have any configured"
+echo "2. Branch protection might be enforced at the environment level instead"
+echo "3. Some protection might be in build/release definitions rather than service connection checks"
+echo "4. Project-level policies might provide the protection instead"
 echo ""
-echo "🔧 Troubleshooting steps:"
-echo "1. Verify you have sufficient permissions in the Azure DevOps project"
-echo "2. Check if the service connection has any 'Approvals and checks' configured in the UI"
-echo "3. Try with a different service connection that you know has branch controls"
-echo "4. Verify the PAT token has the required scopes (Build, Release, Service Connections)"
+echo "⚠️  **Next Steps if No Protection Found:**"
+echo "1. **Configure branch protection**: Go to Project Settings > Service connections > Select '$TEST_CONN_NAME' > Security"
+echo "2. **Add approvals and checks**: Add 'Branch control' check to restrict deployments to main branch"
+echo "3. **Set up environments**: Use environments with approval checks for better control"
+echo "4. **Implement pipeline policies**: Use YAML pipeline approvals and checks"
 echo ""
-echo "📚 Documentation Reference:"
+echo "🔧 **Troubleshooting:**"
+echo "- Verify you have 'Project Collection Administrators' or 'Project Administrators' permissions"
+echo "- Check if the service connection is used in any pipelines"
+echo "- Ensure the PAT token has sufficient scopes (Build, Release, Service Connections)"
+echo ""
+echo "📚 **Documentation Reference:**"
 echo "docs/service-connection-branch-protection-research.md"
-echo ""
-echo "The research approach is comprehensive and should work with proper setup."
