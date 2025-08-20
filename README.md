@@ -106,6 +106,17 @@ Lists all installed Azure DevOps extensions in the organization with their permi
 Options:
 - `--org <ORG>`: The Azure DevOps organization URL. If not provided, uses the default from Azure CLI configuration.
 
+## Research Documentation
+
+### Service Connection Branch Protection Analysis
+
+For detailed information on analyzing service connection security, particularly branch protection controls on AzureRM service connections, see:
+
+- **[Service Connection Branch Protection Research](docs/service-connection-branch-protection-research.md)** - Comprehensive guide on using Azure DevOps CLI to check branch protection controls on service connections
+- **[Test Script](test-service-connection-checks.sh)** - Validation script for testing the documented approach
+
+This research addresses how to identify service connections that restrict usage to specific branches (e.g., main branch only) to prevent unauthorized deployments from feature branches to production environments.
+
 ## Note
 
 This tool requires appropriate permissions in your Azure DevOps organization to access projects, repositories, and other resources.
