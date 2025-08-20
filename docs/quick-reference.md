@@ -25,7 +25,7 @@ az devops invoke \
   --resource "checks" \
   --route-parameters project="yourproject" \
   --http-method GET \
-  --api-version "7.1-preview.1" \
+  --api-version "7.0-preview.1" \
   --query-parameters '$expand=1&resourceType=endpoint&resourceId=YOUR-SERVICE-CONNECTION-ID'
 ```
 
@@ -59,7 +59,7 @@ az devops invoke \
   --resource "HierarchyQuery" \
   --http-method POST \
   --in-file payload.json \
-  --api-version "7.1-preview.1"
+  --api-version "7.0-preview.1"
 ```
 
 ## Parse Results

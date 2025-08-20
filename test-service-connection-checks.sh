@@ -92,7 +92,7 @@ CHECKS_RESULT=$(az devops invoke \
     --resource "checks" \
     --route-parameters project="$PROJECT" \
     --http-method GET \
-    --api-version "7.1-preview.1" \
+    --api-version "7.0-preview.1" \
     --query-parameters "\$expand=1&resourceType=endpoint&resourceId=$TEST_CONN_ID" \
     2>/dev/null || echo '{"value": []}')
 
@@ -157,7 +157,7 @@ HIERARCHY_RESULT=$(az devops invoke \
     --resource "HierarchyQuery" \
     --http-method POST \
     --in-file "$TEMP_PAYLOAD" \
-    --api-version "7.1-preview.1" \
+    --api-version "7.0-preview.1" \
     2>/dev/null || echo '{}')
 
 # Clean up temp file
